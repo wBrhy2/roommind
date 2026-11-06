@@ -423,6 +423,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
         "history_48h": history_48h,
         "compressor_groups": compressor,
         "valve_protection": valve,
+        # Time-of-Use: resolved source kind, active tier/rate and the tier timeline for debugging
+        "tou": (coordinator._tou_manager.snapshot() if coordinator is not None else {"enabled": False}),
         "coil_dry_state": (coordinator._coil_dry_manager.get_state() if coordinator is not None else {}),
         # Live AC sensor offsets {entity: {"heat"|"cool"|"idle": [offset K, readings]}}; settings hold the last save
         "ac_head_offsets": (coordinator._head_offsets.get_state() if coordinator is not None else {}),

@@ -11,6 +11,7 @@ import type {
   DeviceConfig,
   DeviceType,
   DeviceRole,
+  TouMode,
 } from "../types";
 import "./rs-hero-status";
 import "./rs-climate-mode-selector";
@@ -22,6 +23,7 @@ import "./rs-override-section";
 import "./rs-presence-section";
 import "./rs-covers-section";
 import "./rs-heat-source-section";
+import "./rs-tou-section";
 import "../components/shared/rs-toggle-row";
 import "../components/shared/rs-toggle-card";
 import "../components/shared/rs-edit-dialog";
@@ -35,7 +37,8 @@ import type { RsOverrideSection } from "./rs-override-section";
 const CONTROL_DOCS_URL =
   "https://github.com/snazzybean/roommind/blob/main/docs/control-and-devices.md";
 
-type EditableSection = "schedule" | "devices" | "sensors" | "presence" | "covers" | "heatSource";
+type EditableSection =
+  "schedule" | "devices" | "sensors" | "presence" | "covers" | "heatSource" | "tou";
 
 @customElement("rs-room-detail")
 export class RsRoomDetail extends LitElement {
@@ -99,6 +102,9 @@ export class RsRoomDetail extends LitElement {
   @state() private _heatSourcePrimaryDelta = 1.5;
   @state() private _heatSourceOutdoorThreshold = 5.0;
   @state() private _heatSourceAcMinOutdoor = -15.0;
+  @state() private _touMode: TouMode = "off";
+  @state() private _touMaxBoost = 28;
+  @state() private _touBoostUnoccupied = false;
   @state() private _optimisticCoverResume = false;
 
   private _prevAreaId: string | null = null;
@@ -306,6 +312,9 @@ export class RsRoomDetail extends LitElement {
       this._heatSourcePrimaryDelta = this.config.heat_source_primary_delta ?? 1.5;
       this._heatSourceOutdoorThreshold = this.config.heat_source_outdoor_threshold ?? 5.0;
       this._heatSourceAcMinOutdoor = this.config.heat_source_ac_min_outdoor ?? -15.0;
+      this._touMode = this.config.tou_mode ?? "off";
+      this._touMaxBoost = this.config.tou_max_boost ?? 28;
+      this._touBoostUnoccupied = this.config.tou_boost_unoccupied ?? false;
     } else {
       this._devices = [];
       this._selectedTempSensor = "";
@@ -350,6 +359,9 @@ export class RsRoomDetail extends LitElement {
       this._heatSourcePrimaryDelta = 1.5;
       this._heatSourceOutdoorThreshold = 5.0;
       this._heatSourceAcMinOutdoor = -15.0;
+      this._touMode = "off";
+      this._touMaxBoost = 28;
+      this._touBoostUnoccupied = false;
     }
     this._dirty = false;
 
@@ -638,6 +650,25 @@ export class RsRoomDetail extends LitElement {
                 </rs-section-card>`
               : nothing
           }
+          ${
+            !this._isOutdoor && this._devices.length > 0
+              ? html`<rs-section-card
+                  icon="mdi:lightning-bolt"
+                  .heading=${localize("room.section.tou", this.hass.language)}
+                  editable
+                  @edit-click=${this._openEdit("tou")}
+                >
+                  <rs-tou-section
+                    .hass=${this.hass}
+                    .editing=${false}
+                    .touMode=${this._touMode}
+                    .touMaxBoost=${this._touMaxBoost}
+                    .touBoostUnoccupied=${this._touBoostUnoccupied}
+                    @setting-changed=${this._onTouSettingChanged}
+                  ></rs-tou-section>
+                </rs-section-card>`
+              : nothing
+          }
 
           <rs-toggle-card
             icon="mdi:tree"
@@ -921,6 +952,22 @@ export class RsRoomDetail extends LitElement {
             @setting-changed=${this._onHeatSourceSettingChanged}
           ></rs-heat-source-section>
         </rs-edit-dialog>`;
+      case "tou":
+        return html`<rs-edit-dialog
+          open
+          icon="mdi:lightning-bolt"
+          .heading=${localize("room.section.tou", lang)}
+          @rs-dialog-closed=${this._closeEdit}
+        >
+          <rs-tou-section
+            .hass=${this.hass}
+            .editing=${true}
+            .touMode=${this._touMode}
+            .touMaxBoost=${this._touMaxBoost}
+            .touBoostUnoccupied=${this._touBoostUnoccupied}
+            @setting-changed=${this._onTouSettingChanged}
+          ></rs-tou-section>
+        </rs-edit-dialog>`;
     }
   }
 
@@ -1133,6 +1180,15 @@ export class RsRoomDetail extends LitElement {
     this._autoSave();
   }
 
+  private _onTouSettingChanged(e: CustomEvent<{ key: string; value: unknown }>) {
+    const { key, value } = e.detail;
+    e.stopPropagation();
+    if (key === "tou_mode") this._touMode = value as TouMode;
+    else if (key === "tou_max_boost") this._touMaxBoost = value as number;
+    else if (key === "tou_boost_unoccupied") this._touBoostUnoccupied = value as boolean;
+    this._autoSave();
+  }
+
   // ---- Outdoor toggle ----
 
   private _onClimateControlToggle(e: CustomEvent) {
@@ -1209,6 +1265,9 @@ export class RsRoomDetail extends LitElement {
         heat_source_primary_delta: this._heatSourcePrimaryDelta,
         heat_source_outdoor_threshold: this._heatSourceOutdoorThreshold,
         heat_source_ac_min_outdoor: this._heatSourceAcMinOutdoor,
+        tou_mode: this._touMode,
+        tou_max_boost: this._touMaxBoost,
+        tou_boost_unoccupied: this._touBoostUnoccupied,
       });
 
       this._dirty = false;

@@ -100,6 +100,40 @@ export interface DeviceConfig {
 export type ConflictResolution =
   "heating_priority" | "cooling_priority" | "majority" | "outdoor_temp";
 
+/** Normalized tariff tier used by the Time-of-Use module. */
+export type TouTier = "peak" | "mid" | "off" | "ultra_low";
+
+/** Per-room participation in tariff-aware control. */
+export type TouMode = "off" | "setback" | "setback_boost";
+
+/** How a coast window ends after its triggering tier change. */
+export type TouCoastEndMode = "duration" | "clock" | "tier_window";
+
+/** What happens when the coast hold ends. */
+export type TouPostHold = "stay" | "schedule";
+
+export interface TouCoastEnd {
+  mode: TouCoastEndMode;
+  /** minutes | "HH:MM" | tier */
+  value: number | string;
+}
+
+export interface TouCoastRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  rooms: string[];
+  trigger: { from_tier: string; to_tier: string };
+  coast_temp: number;
+  end: TouCoastEnd;
+  post_hold: TouPostHold;
+}
+
+export interface TouCalendarBinding {
+  entity_id: string;
+  tier: TouTier;
+}
+
 /** A stored room whose Home Assistant area was deleted; it rests until the area is back (#494). */
 export interface RoomWithoutArea {
   area_id: string;
@@ -172,6 +206,10 @@ export interface RoomConfig {
   heat_source_outdoor_threshold?: number;
   heat_source_ac_min_outdoor?: number;
   climate_control_enabled?: boolean;
+  /** Per-room Time-of-Use participation (see managers/tou_manager.py). */
+  tou_mode?: TouMode;
+  tou_max_boost?: number | null;
+  tou_boost_unoccupied?: boolean;
   live?: RoomLiveData;
 }
 
@@ -215,6 +253,26 @@ export interface GlobalSettings {
   mold_prevention_notify_enabled?: boolean;
   mold_prevention_notify_targets?: NotificationTarget[];
   compressor_groups?: CompressorGroup[];
+  /** Time-of-Use tariff awareness (managers/tou_manager.py). */
+  tou_enabled?: boolean;
+  tou_rate_entity?: string;
+  tou_period_entity?: string;
+  tou_next_change_entity?: string;
+  tou_next_change_tier?: TouTier;
+  tou_calendar_entities?: TouCalendarBinding[];
+  tou_flag_entities?: Partial<Record<TouTier, string>>;
+  tou_price_weighting?: boolean;
+  tou_peak_threshold?: number | null;
+  tou_mid_threshold?: number | null;
+  tou_ultra_threshold?: number | null;
+  tou_peak_heat_floor?: number;
+  tou_peak_cool_ceiling?: number;
+  tou_mid_setback_delta?: number;
+  tou_boost_delta?: number;
+  tou_clamp_min?: number;
+  tou_clamp_max?: number;
+  tou_coast_max_minutes?: number;
+  tou_coast_rules?: TouCoastRule[];
   room_order?: string[];
   group_by_floor?: boolean;
   boost_applied_at?: Record<string, number>;

@@ -246,6 +246,61 @@ CONFLICT_RESOLUTIONS = [
 ]
 DEFAULT_CONFLICT_RESOLUTION = CONFLICT_RESOLUTION_HEATING_PRIORITY
 
+# Time-of-Use (TOU) tariff awareness
+# Normalized tier vocabulary every tariff source is mapped onto.
+TOU_TIER_PEAK = "peak"
+TOU_TIER_MID = "mid"
+TOU_TIER_OFF = "off"
+TOU_TIER_ULTRA_LOW = "ultra_low"
+TOU_TIER_UNKNOWN = "unknown"
+TOU_TIERS = [TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW]
+
+# Per-room participation level (room["tou_mode"]).
+TOU_MODE_OFF = "off"
+TOU_MODE_SETBACK = "setback"
+TOU_MODE_SETBACK_BOOST = "setback_boost"
+TOU_MODES = [TOU_MODE_OFF, TOU_MODE_SETBACK, TOU_MODE_SETBACK_BOOST]
+
+# Coast-rule end modes and post-hold behavior.
+TOU_END_MODES = ["duration", "clock", "tier_window"]
+TOU_POST_HOLD_MODES = ["stay", "schedule"]
+
+# Tier shaping defaults (settings, all °C internal like the rest of the model).
+DEFAULT_TOU_PEAK_HEAT_FLOOR = 18.0  # PEAK: heat target never above this
+DEFAULT_TOU_PEAK_COOL_CEILING = 28.0  # PEAK: cool target never below this
+DEFAULT_TOU_MID_SETBACK_DELTA = 2.0  # MID: heat −δ / cool +δ
+DEFAULT_TOU_BOOST_DELTA = 2.0  # ULTRA_LOW: heat +δ / cool −δ (boost rooms only)
+DEFAULT_TOU_CLAMP_MIN = 17.0  # final safety band on the adjusted target
+DEFAULT_TOU_CLAMP_MAX = 28.0
+DEFAULT_TOU_COAST_MAX_MINUTES = 480  # cap when a tier_window end is not in the timeline
+TOU_COAST_DURATION_MIN_MINUTES = 15
+TOU_COAST_DURATION_MAX_MINUTES = 720
+
+# How far ahead the tariff timeline is built (minutes). Covers the MPC's
+# longest pre-heat lead (12 h) plus margin.
+TOU_TIMELINE_HORIZON_MINUTES = 960
+
+# Per-block energy-price multipliers when only the tier is known. Scales the
+# MPC's w_energy term; off-peak is the 1.0 reference.
+TOU_PRICE_MULTIPLIERS: dict[str, float] = {
+    TOU_TIER_PEAK: 3.0,
+    TOU_TIER_MID: 1.6,
+    TOU_TIER_OFF: 1.0,
+    TOU_TIER_ULTRA_LOW: 0.8,
+    TOU_TIER_UNKNOWN: 1.0,
+}
+
+# Tariff source kinds reported in diagnostics/snapshot.
+TOU_SOURCE_PERIOD = "period_sensor"
+TOU_SOURCE_FLAGS = "flags"
+TOU_SOURCE_RATE = "rate_thresholds"
+TOU_SOURCE_NONE = "none"
+
+
+def tou_price_multiplier(tier: str) -> float:
+    """Energy-cost weight the MPC applies to a block in *tier*."""
+    return TOU_PRICE_MULTIPLIERS.get(tier, 1.0)
+
 
 # Far-future sentinel: vacation active indefinitely (year 2999)
 VACATION_SENTINEL_UNTIL = 32503680000.0

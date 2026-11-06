@@ -3285,3 +3285,161 @@ def test_setback_auto_off_schema_has_no_default():
     assert on["setback_auto_off"] is True
     with pytest.raises(vol.Invalid):
         _validate({"entity_id": "climate.ac", "type": "ac", "setback_auto_off": "yes"})
+
+
+# ---------------------------------------------------------------------------
+# Time-of-Use settings tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_valid(ws_hass, store, connection):
+    """Saving a complete Time-of-Use configuration succeeds and persists it."""
+    await store.async_load()
+
+    msg = {
+        "id": 60,
+        "type": "roommind/settings/save",
+        "tou_enabled": True,
+        "tou_rate_entity": "sensor.hydro_one_rate",
+        "tou_calendar_entities": [{"entity_id": "calendar.ultou_peak", "tier": "peak"}],
+        "tou_coast_rules": [
+            {
+                "id": "peak-coast",
+                "name": "Coast through peak",
+                "rooms": ["living_room"],
+                "trigger": {"from_tier": "ultra_low", "to_tier": "peak"},
+                "coast_temp": 18.0,
+                "end": {"mode": "duration", "value": 120},
+                "post_hold": "schedule",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    settings = connection.send_result.call_args[0][1]["settings"]
+    assert settings["tou_enabled"] is True
+    assert settings["tou_coast_rules"][0]["end"] == {"mode": "duration", "value": 120}
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_duplicate_rule_id(ws_hass, store, connection):
+    """Coast rule IDs must be unique."""
+    await store.async_load()
+
+    rule = {
+        "id": "r",
+        "name": "x",
+        "rooms": ["living_room"],
+        "trigger": {"from_tier": "ultra_low", "to_tier": "peak"},
+        "coast_temp": 18.0,
+        "end": {"mode": "duration", "value": 120},
+        "post_hold": "schedule",
+    }
+    msg = {"id": 61, "type": "roommind/settings/save", "tou_coast_rules": [rule, dict(rule)]}
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "duplicate_tou_rule_id"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_duration_out_of_range(ws_hass, store, connection):
+    """A duration coast rule needs a sane minute value."""
+    await store.async_load()
+
+    msg = {
+        "id": 62,
+        "type": "roommind/settings/save",
+        "tou_coast_rules": [
+            {
+                "id": "r",
+                "name": "x",
+                "rooms": ["living_room"],
+                "trigger": {"from_tier": "", "to_tier": "peak"},
+                "coast_temp": 18.0,
+                "end": {"mode": "duration", "value": 3},
+                "post_hold": "schedule",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_duration"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_clock_format(ws_hass, store, connection):
+    """A clock coast rule needs an HH:MM value."""
+    await store.async_load()
+
+    msg = {
+        "id": 63,
+        "type": "roommind/settings/save",
+        "tou_coast_rules": [
+            {
+                "id": "r",
+                "name": "x",
+                "rooms": ["living_room"],
+                "trigger": {"from_tier": "", "to_tier": "peak"},
+                "coast_temp": 18.0,
+                "end": {"mode": "clock", "value": "25:99"},
+                "post_hold": "schedule",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_clock"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_tier_window_value(ws_hass, store, connection):
+    """A tier-window coast rule must wait for a known tier."""
+    await store.async_load()
+
+    msg = {
+        "id": 64,
+        "type": "roommind/settings/save",
+        "tou_coast_rules": [
+            {
+                "id": "r",
+                "name": "x",
+                "rooms": ["living_room"],
+                "trigger": {"from_tier": "", "to_tier": "peak"},
+                "coast_temp": 18.0,
+                "end": {"mode": "tier_window", "value": "weekend"},
+                "post_hold": "schedule",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_tier"
+
+
+@pytest.mark.asyncio
+async def test_save_room_tou_fields(ws_hass, store, connection):
+    """Per-room Time-of-Use fields persist on the room."""
+    await store.async_load()
+
+    msg = {
+        "id": 65,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_mode": "setback_boost",
+        "tou_max_boost": 23.0,
+        "tou_boost_unoccupied": True,
+    }
+    await _save_room(ws_hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    room = connection.send_result.call_args[0][1]["room"]
+    assert room["tou_mode"] == "setback_boost"
+    assert room["tou_max_boost"] == 23.0
+    assert room["tou_boost_unoccupied"] is True

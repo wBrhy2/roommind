@@ -1329,6 +1329,7 @@ class MPCController:
         q_rebound: float | None = None,
         previous_heat_sources: str = "none",
         head_offsets: HeadOffsetTracker | None = None,
+        price_series_builder: Callable[[float, int, float], list[float]] | None = None,
     ) -> None:
         self.hass = hass
         self.room_config = room_config
@@ -1367,6 +1368,8 @@ class MPCController:
         self.q_rebound = q_rebound
         # Learned AC sensor offsets (device reading - room sensor); None leaves setpoints in the room frame
         self._head_offsets = head_offsets
+        # Tariff price series builder (start_ts, blocks, dt_minutes) -> multipliers; None = flat energy cost
+        self._price_series_builder = price_series_builder
         self._idle_targets: TargetTemps | None = None
         self._force_off = False
         # Strictest heat / cool target within the MPC guard window (set by _evaluate_mpc)
@@ -1608,6 +1611,17 @@ class MPCController:
         # Build occupancy heat series (constant over horizon)
         occupancy_series = [self.q_occupancy] * horizon_blocks
 
+        # Shared time base so tariff prices and schedule targets index the same blocks.
+        now = time.time()
+        dt_seconds = PLAN_DT_MINUTES * 60
+
+        # Tariff price series for the energy term (None = flat cost).
+        price_series = (
+            self._price_series_builder(now, horizon_blocks, PLAN_DT_MINUTES)
+            if self._price_series_builder is not None
+            else None
+        )
+
         # Build dual target series with schedule lookahead for pre-heating/pre-cooling.
         # None values (from "off" action) are replaced with current_temp so the
         # optimizer sees "no deviation needed = idle optimal".
@@ -1616,8 +1630,6 @@ class MPCController:
         raw_heat: list[float | None] = []
         raw_cool: list[float | None] = []
         if self._target_resolver is not None:
-            now = time.time()
-            dt_seconds = PLAN_DT_MINUTES * 60
             raw_targets = [self._target_resolver(now + i * dt_seconds) for i in range(horizon_blocks)]
             # Extract separate heat and cool series from TargetTemps
             if raw_targets and isinstance(raw_targets[0], TargetTemps):
@@ -1680,6 +1692,7 @@ class MPCController:
                 solar_series=solar_series,
                 residual_series=residual_series,
                 occupancy_series=occupancy_series,
+                price_series=price_series,
                 initial_mode=self.previous_mode,
                 rebound_charge=self.q_rebound,
             )

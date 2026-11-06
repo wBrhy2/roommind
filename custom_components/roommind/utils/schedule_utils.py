@@ -429,11 +429,17 @@ def make_target_resolver(
     presence_away: bool = False,
     mold_prevention_delta: float = 0.0,
     room_vacant: bool = False,
+    tou_adjust: Callable[[float, TargetTemps], TargetTemps] | None = None,
 ) -> Callable[[float], TargetTemps]:
     """Create a sync target resolver function (schedule blocks pre-fetched).
 
     Returns TargetTemps with None values for timestamps where devices should
     be turned off.
+
+    ``tou_adjust`` (Time-of-Use, see managers/tou_manager.py) is composed
+    before the mold-prevention delta and the climate-mode cap, so prevention
+    rides on top of tariff shaping and both modes (MPC horizon and the
+    bang-bang "now" target) see one tariff-aware series.
     """
     comfort_heat = room.get("comfort_heat", room.get("comfort_temp", DEFAULT_COMFORT_HEAT))
     comfort_cool = room.get("comfort_cool", DEFAULT_COMFORT_COOL)
@@ -478,6 +484,8 @@ def make_target_resolver(
         )
         if targets.heat is None and targets.cool is None:
             return targets
+        if tou_adjust is not None:
+            targets = tou_adjust(ts, targets)
         return TargetTemps(
             *cap_cool_only_heat(
                 targets.heat + mold_prevention_delta if targets.heat is not None else None,

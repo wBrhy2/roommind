@@ -1876,3 +1876,42 @@ def test_make_target_resolver_caps_an_empty_room_over_the_horizon():
     resolver = make_target_resolver(None, room, {}, room_vacant=True)
     assert resolver(time.time() + 3600) == TargetTemps(17.0, 27.0)
     assert make_target_resolver(None, room, {})(time.time()) == TargetTemps(21.0, 24.0)
+
+
+def test_make_target_resolver_composes_tou_adjust_before_mold_and_cap():
+    """The Time-of-Use adjuster shapes the horizon series under the mold delta.
+
+    tou_adjust must run on the schedule/presence result but never on a forced
+    "off" pair, and the mold-prevention delta rides on top of the TOU target.
+    """
+    from custom_components.roommind.utils.schedule_utils import make_target_resolver
+
+    room = {
+        "comfort_heat": 21.0,
+        "comfort_cool": 24.0,
+        "eco_heat": 17.0,
+        "eco_cool": 27.0,
+        "climate_mode": "auto",
+    }
+
+    def tou_adjust(ts: float, targets: TargetTemps) -> TargetTemps:
+        if targets.heat is None and targets.cool is None:
+            return targets
+        return TargetTemps(heat=min(targets.heat, 18.0), cool=max(targets.cool, 28.0))
+
+    resolver = make_target_resolver(None, room, {}, tou_adjust=tou_adjust)
+    assert resolver(time.time()) == TargetTemps(18.0, 28.0)
+
+    # Off stays off even with the adjuster composed in.
+    resolver = make_target_resolver(
+        None,
+        room,
+        {"presence_away_action": "off"},
+        presence_away=True,
+        tou_adjust=tou_adjust,
+    )
+    assert resolver(time.time()) == TargetTemps(None, None)
+
+    # Mold prevention raises the TOU-setback heating target, not the reverse.
+    resolver = make_target_resolver(None, room, {}, mold_prevention_delta=1.0, tou_adjust=tou_adjust)
+    assert resolver(time.time()) == TargetTemps(19.0, 28.0)

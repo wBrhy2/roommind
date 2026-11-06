@@ -79,6 +79,7 @@ from .managers.head_offset_tracker import HeadOffsetTracker
 from .managers.heat_source_orchestrator import HeatSourcePlan, evaluate_heat_sources
 from .managers.mold_manager import MoldManager
 from .managers.residual_heat_tracker import AcReboundTracker, ResidualHeatTracker
+from .managers.tou_manager import TouManager
 from .managers.valve_manager import ValveManager
 from .managers.weather_manager import WeatherManager
 from .managers.window_manager import WindowManager
@@ -191,6 +192,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self._pending_predictions: dict[str, float] = {}
         self._prediction_forecasts: dict[str, list[dict]] = {}
         self._weather_manager = WeatherManager(hass)
+        # Time-of-Use tariff awareness (tier timeline + target shaping + MPC prices)
+        self._tou_manager = TouManager(hass)
         self._current_q_solar: float = 0.0
         # Valve protection (anti-seize)
         self._valve_manager = ValveManager(hass)
@@ -217,6 +220,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self._heat_source_states: dict[str, str] = {}
         # Track which rooms already have entity platform entities registered
         self._entity_areas: set[str] = set()
+        # Global tariff sensors are created when Time-of-Use is first enabled
+        self._tou_entities_added: bool = False
         # Min-run enforcement: timestamp when current non-idle mode started
         self._mode_on_since: dict[str, float] = {}
         # When the room last went idle; a setback device stays on for a while after it (#255)
@@ -328,6 +333,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             time.time(),
             cloud_coverage,
         )
+
+        # Time-of-Use: build the tariff tier timeline once per cycle for all rooms.
+        await self._tou_manager.async_build_timeline(settings)
 
         await self._async_switch_resting_rooms_off(stored_rooms, rooms, settings)
         for area_id, room in rooms.items():
@@ -477,7 +485,21 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             self._coil_dry_manager.state_dirty = False
 
         self.rooms = room_states
-        return {"rooms": room_states}
+        data: dict[str, Any] = {"rooms": room_states}
+        tou_snapshot = self._tou_manager.snapshot()
+        if tou_snapshot.get("enabled"):
+            data["tou"] = tou_snapshot
+            self._maybe_add_tou_entities()
+        return data
+
+    def _maybe_add_tou_entities(self) -> None:
+        """Create the global tariff sensors the first time TOU reports enabled."""
+        if self._tou_entities_added or self.async_add_entities is None:
+            return
+        from .sensor import _create_global_entities
+
+        self.async_add_entities(_create_global_entities(self))
+        self._tou_entities_added = True
 
     def _read_room_sensors(
         self,
@@ -755,9 +777,21 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         # Determine dual heat/cool target temperatures
         # Returns TargetTemps(heat, cool). None values mean "force off".
         occupancy_vacant = is_room_vacant(self.hass, room, time.time())
+        presence_away = not room.get("ignore_presence", False) and self._is_presence_away(room, settings)
+        # Time-of-Use tariff shaping: composed into the horizon resolver below and
+        # applied to the "now" targets here, so MPC and bang-bang see one series.
+        tou_adjust = self._tou_manager.make_adjuster(
+            room,
+            settings,
+            room_vacant=occupancy_vacant,
+            presence_away=presence_away,
+            mold_active=mold_prevention_active_room and mold_prevention_temp_delta > 0,
+        )
         targets = self._resolve_target_temps(
             room, settings, schedule_blocks, schedule_entity_id, room_vacant=occupancy_vacant
         )
+        if tou_adjust is not None:
+            targets = tou_adjust(time.time(), targets)
 
         # Apply mold prevention temperature delta (heating target only).
         # Safety: mold prevention overrides "off" to prevent structural damage.
@@ -777,7 +811,6 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                     cool=targets.cool,
                 )
         targets = TargetTemps(*cap_cool_only_heat(targets.heat, targets.cool, room.get("climate_mode", "auto")))
-        presence_away = not room.get("ignore_presence", False) and self._is_presence_away(room, settings)
         target_resolver = make_target_resolver(
             schedule_blocks,
             room,
@@ -786,6 +819,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             presence_away=presence_away,
             mold_prevention_delta=mold_prevention_temp_delta,
             room_vacant=occupancy_vacant,
+            tou_adjust=tou_adjust,
         )
 
         # After a reload or restart the previous mode is unknown; seed it from what the
@@ -859,6 +893,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             q_rebound=q_rebound,
             previous_heat_sources=self._heat_source_states.get(area_id, "none"),
             head_offsets=self._head_offsets,
+            price_series_builder=self._tou_manager.make_price_series_builder(room, settings),
         )
         mode, power_fraction = await controller.async_evaluate(current_temp, targets)
 

@@ -23,6 +23,12 @@ from .const import (
     MIN_OCCUPANCY_ECO_DELAY_MINUTES,
     OVERRIDE_CUSTOM,
     OVERRIDE_TYPES,
+    TOU_COAST_DURATION_MAX_MINUTES,
+    TOU_COAST_DURATION_MIN_MINUTES,
+    TOU_END_MODES,
+    TOU_MODES,
+    TOU_POST_HOLD_MODES,
+    TOU_TIERS,
     build_override_live,
     is_override_suppressed,
 )
@@ -158,6 +164,9 @@ _ROOM_SAVE_FIELDS = (
     "heat_source_ac_min_outdoor",
     "valve_protection_exclude",
     "climate_control_enabled",
+    "tou_mode",
+    "tou_max_boost",
+    "tou_boost_unoccupied",
 )
 
 _SETTINGS_SAVE_FIELDS = (
@@ -202,6 +211,25 @@ _SETTINGS_SAVE_FIELDS = (
     "room_order",
     "group_by_floor",
     "compressor_groups",
+    "tou_enabled",
+    "tou_rate_entity",
+    "tou_period_entity",
+    "tou_next_change_entity",
+    "tou_next_change_tier",
+    "tou_calendar_entities",
+    "tou_flag_entities",
+    "tou_price_weighting",
+    "tou_peak_threshold",
+    "tou_mid_threshold",
+    "tou_ultra_threshold",
+    "tou_peak_heat_floor",
+    "tou_peak_cool_ceiling",
+    "tou_mid_setback_delta",
+    "tou_boost_delta",
+    "tou_clamp_min",
+    "tou_clamp_max",
+    "tou_coast_max_minutes",
+    "tou_coast_rules",
 )
 
 
@@ -470,6 +498,9 @@ async def websocket_list_rooms(
         vol.Optional("heat_source_outdoor_threshold"): vol.All(vol.Coerce(float), vol.Range(min=-20, max=25)),
         vol.Optional("heat_source_ac_min_outdoor"): vol.All(vol.Coerce(float), vol.Range(min=-30, max=5)),
         vol.Optional("climate_control_enabled"): bool,
+        vol.Optional("tou_mode"): vol.In(TOU_MODES),
+        vol.Optional("tou_max_boost"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
+        vol.Optional("tou_boost_unoccupied"): bool,
     }
 )
 @websocket_api.async_response
@@ -818,6 +849,50 @@ async def websocket_get_settings(
                 vol.Optional("enforce_uniform_mode", default=False): bool,
             }
         ],
+        vol.Optional("tou_enabled"): bool,
+        vol.Optional("tou_rate_entity"): str,
+        vol.Optional("tou_period_entity"): str,
+        vol.Optional("tou_next_change_entity"): str,
+        vol.Optional("tou_next_change_tier"): vol.In(TOU_TIERS),
+        vol.Optional("tou_calendar_entities"): vol.All(
+            [
+                {
+                    vol.Required("entity_id"): str,
+                    vol.Required("tier"): vol.In(TOU_TIERS),
+                }
+            ],
+            vol.Length(max=4),
+        ),
+        vol.Optional("tou_flag_entities"): {vol.In(TOU_TIERS): str},
+        vol.Optional("tou_price_weighting"): bool,
+        vol.Optional("tou_peak_threshold"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("tou_mid_threshold"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("tou_ultra_threshold"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("tou_peak_heat_floor"): vol.All(vol.Coerce(float), vol.Range(min=5, max=35)),
+        vol.Optional("tou_peak_cool_ceiling"): vol.All(vol.Coerce(float), vol.Range(min=5, max=40)),
+        vol.Optional("tou_mid_setback_delta"): vol.All(vol.Coerce(float), vol.Range(min=0, max=5)),
+        vol.Optional("tou_boost_delta"): vol.All(vol.Coerce(float), vol.Range(min=0, max=5)),
+        vol.Optional("tou_clamp_min"): vol.All(vol.Coerce(float), vol.Range(min=5, max=35)),
+        vol.Optional("tou_clamp_max"): vol.All(vol.Coerce(float), vol.Range(min=5, max=40)),
+        vol.Optional("tou_coast_max_minutes"): vol.All(vol.Coerce(int), vol.Range(min=30, max=1440)),
+        vol.Optional("tou_coast_rules"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("name"): str,
+                vol.Optional("enabled", default=True): bool,
+                vol.Required("rooms"): vol.All([str], vol.Length(min=1)),
+                vol.Optional("trigger", default={}): {
+                    vol.Optional("from_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
+                    vol.Optional("to_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
+                },
+                vol.Required("coast_temp"): vol.All(vol.Coerce(float), vol.Range(min=5, max=35)),
+                vol.Required("end"): {
+                    vol.Required("mode"): vol.In(TOU_END_MODES),
+                    vol.Required("value"): vol.Any(vol.Coerce(int), str),
+                },
+                vol.Optional("post_hold", default="schedule"): vol.In(TOU_POST_HOLD_MODES),
+            }
+        ],
     }
 )
 @websocket_api.async_response
@@ -905,6 +980,48 @@ async def websocket_save_settings(
                 "A master entity cannot be assigned to multiple groups",
             )
             return
+
+    # Validate Time-of-Use coast rules
+    rules = changes.get("tou_coast_rules")
+    if rules:
+        rule_ids = [r.get("id", "") for r in rules]
+        if len(rule_ids) != len(set(rule_ids)):
+            connection.send_error(msg["id"], "duplicate_tou_rule_id", "Coast rule IDs must be unique")
+            return
+        for r in rules:
+            end = r.get("end", {})
+            mode, value = end.get("mode"), end.get("value")
+            if mode == "duration" and not (
+                isinstance(value, int) and TOU_COAST_DURATION_MIN_MINUTES <= value <= TOU_COAST_DURATION_MAX_MINUTES
+            ):
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_coast_duration",
+                    f"Duration coast rules need a value of {TOU_COAST_DURATION_MIN_MINUTES}"
+                    f"-{TOU_COAST_DURATION_MAX_MINUTES} minutes",
+                )
+                return
+            if mode == "clock":
+                parts = str(value or "").split(":")
+                ok = (
+                    len(parts) >= 2
+                    and parts[0].isdigit()
+                    and parts[1].isdigit()
+                    and 0 <= int(parts[0]) <= 23
+                    and 0 <= int(parts[1]) <= 59
+                )
+                if not ok:
+                    connection.send_error(
+                        msg["id"], "invalid_tou_coast_clock", "Clock coast rules need a value of 'HH:MM'"
+                    )
+                    return
+            if mode == "tier_window" and value not in TOU_TIERS:
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_coast_tier",
+                    f"tier_window coast rules need one of {', '.join(TOU_TIERS)}",
+                )
+                return
 
     settings = await store.async_save_settings(changes)
     connection.send_result(msg["id"], {"settings": settings})

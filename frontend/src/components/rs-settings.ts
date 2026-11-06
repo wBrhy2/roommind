@@ -12,6 +12,8 @@ import type {
   NotificationTarget,
   CompressorGroup,
   RoomWithoutArea,
+  TouCalendarBinding,
+  TouCoastRule,
 } from "../types";
 import { localize } from "../utils/localize";
 import { fireSaveStatus } from "../utils/events";
@@ -21,6 +23,7 @@ import "./settings/rs-settings-general";
 import "./settings/rs-settings-sensors";
 import "./settings/rs-settings-control";
 import "./settings/rs-settings-presence";
+import "./settings/rs-settings-tou";
 import "./settings/rs-settings-vacation";
 import "./settings/rs-settings-valve";
 import "./settings/rs-settings-compressor";
@@ -72,6 +75,23 @@ export class RsSettings extends LitElement {
   @state() private _moldPreventionIntensity: "light" | "medium" | "strong" = "medium";
   @state() private _moldPreventionNotify = false;
   @state() private _compressorGroups: CompressorGroup[] = [];
+  @state() private _touEnabled = false;
+  @state() private _touRateEntity = "";
+  @state() private _touPeriodEntity = "";
+  @state() private _touNextChangeEntity = "";
+  @state() private _touNextChangeTier = "peak";
+  @state() private _touCalendarEntities: TouCalendarBinding[] = [];
+  @state() private _touFlagEntities: Record<string, string> = {};
+  @state() private _touPriceWeighting = true;
+  @state() private _touThresholds: Record<string, string> = {};
+  @state() private _touPeakHeatFloor = 18;
+  @state() private _touPeakCoolCeiling = 28;
+  @state() private _touMidSetbackDelta = 2;
+  @state() private _touBoostDelta = 2;
+  @state() private _touClampMin = 17;
+  @state() private _touClampMax = 28;
+  @state() private _touCoastMaxMinutes = 480;
+  @state() private _touCoastRules: TouCoastRule[] = [];
   @state() private _coilDryEnabled = false;
   @state() private _coilDryMinutes = 20;
   @state() private _coilDryMode: "fan_only" | "dry" = "fan_only";
@@ -140,6 +160,27 @@ export class RsSettings extends LitElement {
       this._moldPreventionIntensity = s.mold_prevention_intensity ?? "medium";
       this._moldPreventionNotify = s.mold_prevention_notify_enabled ?? false;
       this._compressorGroups = s.compressor_groups ?? [];
+      this._touEnabled = s.tou_enabled ?? false;
+      this._touRateEntity = s.tou_rate_entity ?? "";
+      this._touPeriodEntity = s.tou_period_entity ?? "";
+      this._touNextChangeEntity = s.tou_next_change_entity ?? "";
+      this._touNextChangeTier = s.tou_next_change_tier ?? "peak";
+      this._touCalendarEntities = s.tou_calendar_entities ?? [];
+      this._touFlagEntities = s.tou_flag_entities ?? {};
+      this._touPriceWeighting = s.tou_price_weighting ?? true;
+      this._touThresholds = {
+        tou_peak_threshold: s.tou_peak_threshold != null ? String(s.tou_peak_threshold) : "",
+        tou_mid_threshold: s.tou_mid_threshold != null ? String(s.tou_mid_threshold) : "",
+        tou_ultra_threshold: s.tou_ultra_threshold != null ? String(s.tou_ultra_threshold) : "",
+      };
+      this._touPeakHeatFloor = s.tou_peak_heat_floor ?? 18;
+      this._touPeakCoolCeiling = s.tou_peak_cool_ceiling ?? 28;
+      this._touMidSetbackDelta = s.tou_mid_setback_delta ?? 2;
+      this._touBoostDelta = s.tou_boost_delta ?? 2;
+      this._touClampMin = s.tou_clamp_min ?? 17;
+      this._touClampMax = s.tou_clamp_max ?? 28;
+      this._touCoastMaxMinutes = s.tou_coast_max_minutes ?? 480;
+      this._touCoastRules = s.tou_coast_rules ?? [];
       this._coilDryEnabled = s.coil_dry_enabled ?? false;
       this._coilDryMinutes = s.coil_dry_minutes ?? 20;
       this._coilDryMode = s.coil_dry_mode ?? "fan_only";
@@ -295,6 +336,37 @@ export class RsSettings extends LitElement {
         ></rs-settings-compressor>
       </rs-settings-panel>
 
+      <rs-settings-panel
+        icon="mdi:lightning-bolt"
+        .heading=${localize("tou.title", l)}
+        .intro=${localize("settings.intro.tou", l)}
+      >
+        <rs-settings-tou
+          .hass=${this.hass}
+          .touEnabled=${this._touEnabled}
+          .touRateEntity=${this._touRateEntity}
+          .touPeriodEntity=${this._touPeriodEntity}
+          .touNextChangeEntity=${this._touNextChangeEntity}
+          .touNextChangeTier=${this._touNextChangeTier}
+          .touCalendarEntities=${this._touCalendarEntities}
+          .touFlagEntities=${this._touFlagEntities}
+          .touPriceWeighting=${this._touPriceWeighting}
+          .touThresholds=${this._touThresholds}
+          .touPeakHeatFloor=${this._touPeakHeatFloor}
+          .touPeakCoolCeiling=${this._touPeakCoolCeiling}
+          .touMidSetbackDelta=${this._touMidSetbackDelta}
+          .touBoostDelta=${this._touBoostDelta}
+          .touClampMin=${this._touClampMin}
+          .touClampMax=${this._touClampMax}
+          .touCoastMaxMinutes=${this._touCoastMaxMinutes}
+          .touCoastRules=${this._touCoastRules}
+          .roomAreas=${Object.fromEntries(
+            Object.entries(this.rooms).map(([id, r]) => [id, r.display_name || id]),
+          )}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-tou>
+      </rs-settings-panel>
+
       <rs-settings-panel .heading=${localize("coil_dry.title", l)} icon="mdi:air-filter">
         <rs-settings-coil-dry
           .hass=${this.hass}
@@ -403,6 +475,12 @@ export class RsSettings extends LitElement {
     return [...modes].sort();
   }
 
+  private _numOrNull(raw: string | undefined): number | null {
+    if (raw === undefined || raw === "") return null;
+    const v = parseFloat(raw);
+    return isNaN(v) ? null : v;
+  }
+
   private _tsToDatetimeLocal(ts: number): string {
     const d = new Date(ts * 1000);
     const pad = (n: number) => String(n).padStart(2, "0");
@@ -466,6 +544,27 @@ export class RsSettings extends LitElement {
         mold_prevention_notify_targets: this._moldPreventionNotify
           ? this._moldNotificationTargets.filter((t) => t.entity_id)
           : [],
+        tou_enabled: this._touEnabled,
+        tou_rate_entity: this._touRateEntity,
+        tou_period_entity: this._touPeriodEntity,
+        tou_next_change_entity: this._touNextChangeEntity,
+        tou_next_change_tier: this._touNextChangeTier,
+        tou_calendar_entities: this._touCalendarEntities.filter((c) => c.entity_id),
+        tou_flag_entities: Object.fromEntries(
+          Object.entries(this._touFlagEntities).filter(([, v]) => v),
+        ),
+        tou_price_weighting: this._touPriceWeighting,
+        tou_peak_threshold: this._numOrNull(this._touThresholds["tou_peak_threshold"]),
+        tou_mid_threshold: this._numOrNull(this._touThresholds["tou_mid_threshold"]),
+        tou_ultra_threshold: this._numOrNull(this._touThresholds["tou_ultra_threshold"]),
+        tou_peak_heat_floor: this._touPeakHeatFloor,
+        tou_peak_cool_ceiling: this._touPeakCoolCeiling,
+        tou_mid_setback_delta: this._touMidSetbackDelta,
+        tou_boost_delta: this._touBoostDelta,
+        tou_clamp_min: this._touClampMin,
+        tou_clamp_max: this._touClampMax,
+        tou_coast_max_minutes: this._touCoastMaxMinutes,
+        tou_coast_rules: this._touCoastRules.filter((r) => r.rooms.length > 0),
       });
       // Toggled again while the request was out: stays dirty, the queued save sends it.
       if (this._climateControlActive === sentClimateControl) this._climateControlDirty = false;

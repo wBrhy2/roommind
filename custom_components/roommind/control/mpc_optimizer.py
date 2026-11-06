@@ -142,6 +142,7 @@ class MPCOptimizer:
         solar_series: list[float] | None = None,
         residual_series: list[float] | None = None,
         occupancy_series: list[float] | None = None,
+        price_series: list[float] | None = None,
         initial_mode: str = MODE_IDLE,
         rebound_charge: float | None = None,
     ) -> MPCPlan:
@@ -153,6 +154,14 @@ class MPCOptimizer:
         Accepts dual target series (heat_target_series + cool_target_series)
         for dead-band-aware optimization. If cool_target_series is None,
         it defaults to heat_target_series (single-target behavior).
+
+        ``price_series`` weights the energy term of the cost function per
+        block (1.0 = the off-peak reference). A run that would burn energy in
+        an expensive block therefore costs more, so the same target plan gets
+        charged earlier in a cheap tier and idles through the expensive one —
+        the room coasts on stored heat and only re-fires when the prediction
+        crosses the target floor. None leaves behavior byte-identical to
+        without tariff awareness.
 
         With ``start_penalty`` set, choosing an active mode the previous block did
         not run costs ``w_comfort * start_penalty``; ``initial_mode`` is the mode
@@ -191,6 +200,7 @@ class MPCOptimizer:
         q_solar = solar_series or [0.0] * n_blocks
         q_residual = residual_series or [0.0] * n_blocks
         q_occupancy = occupancy_series or [0.0] * n_blocks
+        prices = price_series
 
         actions: list[str] = []
         temp_lo, temp_hi = self._temp_bounds(T_room)
@@ -235,6 +245,7 @@ class MPCOptimizer:
                 future_solar = q_solar[i:] if q_solar else None
                 future_residual = q_residual[i:] if q_residual else None
                 future_occupancy = q_occupancy[i:] if q_occupancy else None
+                future_prices = prices[i:] if prices else None
                 for action in available:
                     cost = self._evaluate_action(
                         action,
@@ -249,6 +260,7 @@ class MPCOptimizer:
                         future_solar=future_solar,
                         future_residual=future_residual,
                         future_occupancy=future_occupancy,
+                        future_prices=future_prices,
                         rebound_charge=charge,
                     )
                     if self.start_penalty and action == MODE_HEATING and last_action != MODE_HEATING:
@@ -499,6 +511,7 @@ class MPCOptimizer:
         future_solar: list[float] | None = None,
         future_residual: list[float] | None = None,
         future_occupancy: list[float] | None = None,
+        future_prices: list[float] | None = None,
         rebound_charge: float | None = None,
     ) -> float:
         """Evaluate the cost of taking an action, looking a few steps ahead.
@@ -509,6 +522,9 @@ class MPCOptimizer:
         sustained-comfort benefit of pre-heating. Radiator / "" lookahead stays
         at LOOKAHEAD_BASE_BLOCKS and synthesis is gated off — byte-identical
         to pre-fix behaviour.
+
+        ``future_prices`` scales the energy term per simulated block
+        (1.0 = off-peak reference); None keeps the flat ``w_energy`` cost.
         """
         lookahead = min(self._lookahead_blocks, len(future_T_outdoor))
         Q = self._action_to_Q(action)
@@ -541,6 +557,7 @@ class MPCOptimizer:
 
         charge = rebound_charge
         synth_pf_sum = 0.0
+        prices = future_prices or []
         for j in range(lookahead):
             qs = solar[j] if j < len(solar) else 0.0
             qo = occupancy[j] if j < len(occupancy) else 0.0
@@ -603,9 +620,11 @@ class MPCOptimizer:
             elif T > c_tgt:
                 total_cost += self.w_comfort * (T - c_tgt) ** 2
             # else: inside dead band, no comfort cost
-            # Energy cost: proportional to HVAC power for min_run blocks
+            # Energy cost: proportional to HVAC power for min_run blocks,
+            # weighted by the tariff price of the block it lands in.
             if j < run_blocks and action != MODE_IDLE:
-                total_cost += self.w_energy * abs(Q) / 1000.0
+                price = prices[j] if j < len(prices) else 1.0
+                total_cost += self.w_energy * price * abs(Q) / 1000.0
 
         return total_cost
 
