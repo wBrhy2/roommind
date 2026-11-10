@@ -182,8 +182,8 @@ class TouManager:
                     points.update((ev_start, ev_end))
                     events.append((ev_start, ev_end, tier))
 
-        if not events and lookahead in ("auto", "next_change"):
-            next_ts, next_tier = self._resolve_next_change(settings)
+        if not events and lookahead in ("auto", "next_change", "next_change_rate"):
+            next_ts, next_tier = self._resolve_next_change(settings, lookahead)
             if next_ts is not None and now < next_ts < horizon:
                 points.add(next_ts)
                 events.append((next_ts, horizon, next_tier))
@@ -259,17 +259,17 @@ class TouManager:
             return TOU_TIER_ULTRA_LOW
         return TOU_TIER_OFF
 
-    def _resolve_next_change(self, settings: dict[str, Any]) -> tuple[float | None, str]:
-        """Read the next-change timestamp sensor and the assumed tier after it.
+    def _resolve_next_change(self, settings: dict[str, Any], lookahead: str) -> tuple[float | None, str]:
+        """Read the next-change timestamp and the tier that follows it.
 
-        An unbound entity or an unselected "leads into" tier yields no
-        lookahead at all — a half-configured source never guesses a tier.
+        ``next_change_rate`` mode classifies the rate the provider publishes
+        for the period after the change (same cost thresholds as the rate
+        tier source); the fixed-tier modes read the tier dropdown. An
+        unusable input at either step yields no lookahead at all rather
+        than a guessed tier.
         """
         entity_id = str(settings.get("tou_next_change_entity") or "")
         if not entity_id:
-            return None, TOU_TIER_UNKNOWN
-        tier = str(settings.get("tou_next_change_tier") or "")
-        if tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
             return None, TOU_TIER_UNKNOWN
         state = self.hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown"):
@@ -281,7 +281,32 @@ class TouManager:
             raw = dt_util.parse_datetime(str(state.state))
         if raw is None:
             return None, TOU_TIER_UNKNOWN
+        if lookahead == "next_change_rate":
+            next_rate = self._read_float_state(str(settings.get("tou_next_rate_entity") or ""))
+            tier = self._tier_from_rate(next_rate, settings)
+            if tier == TOU_TIER_UNKNOWN:
+                return None, TOU_TIER_UNKNOWN
+            return raw.timestamp(), tier
+        tier = str(settings.get("tou_next_change_tier") or "")
+        if tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
+            if lookahead == "auto" and settings.get("tou_next_rate_entity"):
+                tier = self._tier_from_rate(self._read_float_state(str(settings["tou_next_rate_entity"])), settings)
+                if tier != TOU_TIER_UNKNOWN:
+                    return raw.timestamp(), tier
+            return None, TOU_TIER_UNKNOWN
         return raw.timestamp(), tier
+
+    def _read_float_state(self, entity_id: str) -> float | None:
+        """Numeric state of any bound entity, or None (unavailable/garbage)."""
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unavailable", "unknown"):
+            return None
+        try:
+            return float(state.state)
+        except (TypeError, ValueError):
+            return None
 
     async def _async_calendar_windows(self, entity_id: str, now: float, horizon: float) -> list[tuple[float, float]]:
         """Return [start, end] epoch windows of running/upcoming events, clamped to the horizon."""
@@ -551,7 +576,7 @@ class TouManager:
             return self._next_clock_ts(boundary_ts, str(end_value or ""))
         if end_mode == "tier_window":
             tier = str(end_value or "")
-            nxt = timeline.next_boundary_after(boundary_ts, tier)
+            nxt = timeline.next_boundary_after(boundary_ts, tier or None)
             if nxt is not None:
                 return nxt
             return min(boundary_ts + cap_minutes * 60.0, horizon_end)

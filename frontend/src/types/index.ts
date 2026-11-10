@@ -110,8 +110,10 @@ export type TouMode = "off" | "setback" | "setback_boost";
 export type TouTierSource = "auto" | "period" | "rate" | "flags";
 
 /** Which source provides the future-tier timeline ("auto" = calendars, then
- * next-change; "none" = shape only, no pre-conditioning/coasting planning). */
-export type TouLookahead = "auto" | "calendar" | "next_change" | "none";
+ * next-change; "next_change_rate" = classify the provider's next-period rate
+ * with the cost thresholds; "none" = shape only, no pre-conditioning/coasting
+ * planning). */
+export type TouLookahead = "auto" | "calendar" | "next_change_rate" | "next_change" | "none";
 
 /** How a coast window ends after its triggering tier change. */
 export type TouCoastEndMode = "duration" | "clock" | "tier_window";
@@ -267,6 +269,7 @@ export interface GlobalSettings {
   tou_rate_entity?: string;
   tou_period_entity?: string;
   tou_next_change_entity?: string;
+  tou_next_rate_entity?: string;
   /** "" = no lookahead (the next-change step is disabled). */
   tou_next_change_tier?: TouTier | "";
   tou_calendar_entities?: TouCalendarBinding[];

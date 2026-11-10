@@ -34,6 +34,12 @@ the currently active tier applies):
   timeline*: exact peak windows in both directions, which is what coasting
   and pre-conditioning plan against. Works with the built-in **Local
   Calendar** integration — no automations required.
+- **Next-change rate sensor** (default) — some providers publish not only
+  *when* the next change starts but *what the price will be* after it (a
+  "next rate" entity). Bind it alongside the next-change timestamp and
+  RoomMind classifies that price with the same cost thresholds to learn the
+  incoming tier — no fixed "leads into" guess needed. If the reading is
+  unavailable or the thresholds are missing, the lookahead simply stays off.
 - **Next change sensor** — for integrations that only publish a timestamp
   for the next tier boundary (e.g. Hydro One's `…_next_peak_starts`).
   RoomMind sees *one step* ahead: the sensor gives the when, the **Tier
@@ -74,6 +80,40 @@ current:
   change" selector then simply states which dispatch state your automation
   flips to next. Pre-condition quality depends on your automation's
   boundary predictions being right; nothing else in the chain changes.
+
+### Storing excess solar as thermal mass
+
+The same machinery is a neat fit for one case that has nothing to do with a
+utility timetable: **free energy you would otherwise export or curtail**.
+Midday photovoltaic surplus is exactly what the `ultra_low` tier means to
+RoomMind — *cheap now, use it* — so an automation that watches your
+inverter/meter can publish the surplus state instead of a tariff:
+
+- Write an ultra-low price (or select the ultra-low period) into the cost or
+  period helper whenever production exceeds consumption, and the normal
+  tariff state back when it does not. Bind that helper as your tariff source.
+- Rooms on `setback + boost` respond as they would to an ultra-cheap window:
+  the MPC raises heating targets up to each room's **Highest pre-charge
+  target** and runs the heat pump early, so the building's mass — walls,
+  screed, furniture — soaks the surplus up as heat. Cooling works mirrored:
+  a surplus window may pre-chill instead, storing coolth for the afternoon.
+- Tick **Boost even when nobody is here** on rooms you want charging while
+  empty — the whole point is that the sun shines whether or not you are in
+  the room.
+- When the surplus ends (clouds, battery full, feed-in capped), the tier
+  falls back and the stored heat carries the house into the evening; a coast
+  rule ending **Any tier change** or at a wall-clock time can hold it
+  through the peak that follows.
+- Predictable patterns — "solar surplus roughly 10:00–15:00 in spring" — can
+  be expressed with a calendar on the ultra-low tier, and the MPC will plan
+  the soak-up around its forecast; the helper approach captures the actual,
+  dynamic surplus. The two can coexist: calendars give the future, the
+  period/cost helper corrects the present.
+
+Treat it as comfort-buffered storage: the clamps (`Lowest/Highest allowed
+target`) and per-room boost caps are what stop a bright March noon from
+turning the living room into a greenhouse — set them where you would still
+want to sit at 17:00.
 
 ## Room participation
 
@@ -122,10 +162,12 @@ For every matching change in the timeline the rule computes a window:
 - **Trigger**: which change starts it (`from tier → to tier`, either side may
   stay "Any tier"), across the rooms you tick.
 - **Coast ends after**: a fixed duration (change + X minutes), at a wall-clock
-  time (e.g. `07:30` — the departure time the comfort must last until), or at
+  time (e.g. `07:30` — the departure time the comfort must last until), at
   the next change into a chosen tier (the cheap window that ends the peak;
   with a fallback to the **Maximum coast duration** if that tier never arrives
-  in the visible horizon).
+  in the visible horizon), or at **Any tier change** — the next boundary no
+  matter which tier it leads into, which suits tariffs whose future beyond
+  one step is unpredictable.
 - **When the hold ends**: `Return to schedule` hands the target back (the MPC
   then treats the rise like any scheduled block and pre-heats toward it), or
   `Keep holding` holds the coast temperature until the next tier change.

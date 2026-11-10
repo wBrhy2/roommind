@@ -219,6 +219,7 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_rate_entity",
     "tou_period_entity",
     "tou_next_change_entity",
+    "tou_next_rate_entity",
     "tou_next_change_tier",
     "tou_calendar_entities",
     "tou_flag_entities",
@@ -859,6 +860,7 @@ async def websocket_get_settings(
         vol.Optional("tou_rate_entity"): str,
         vol.Optional("tou_period_entity"): str,
         vol.Optional("tou_next_change_entity"): str,
+        vol.Optional("tou_next_rate_entity"): str,
         vol.Optional("tou_next_change_tier"): vol.Any("", vol.In(TOU_TIERS)),
         vol.Optional("tou_calendar_entities"): vol.All(
             [
@@ -1021,11 +1023,11 @@ async def websocket_save_settings(
                         msg["id"], "invalid_tou_coast_clock", "Clock coast rules need a value of 'HH:MM'"
                     )
                     return
-            if mode == "tier_window" and value not in TOU_TIERS:
+            if mode == "tier_window" and value not in (*TOU_TIERS, ""):
                 connection.send_error(
                     msg["id"],
                     "invalid_tou_coast_tier",
-                    f"tier_window coast rules need one of {', '.join(TOU_TIERS)}",
+                    f"tier_window coast rules need one of {', '.join(TOU_TIERS)}, or '' for any change",
                 )
                 return
 

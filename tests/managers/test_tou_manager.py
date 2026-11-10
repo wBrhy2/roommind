@@ -316,6 +316,57 @@ async def test_lookahead_mode_selects_the_future_source() -> None:
 
 
 @pytest.mark.asyncio
+async def test_lookahead_next_change_rate() -> None:
+    """The rate published for the period after the next change decides the tier."""
+    from homeassistant.util import dt as dt_util
+
+    now = time.time()
+    future = now + 2 * 3600.0
+    iso = dt_util.utc_from_timestamp(future).isoformat()
+    hass = _make_hass(
+        {
+            "sensor.period": "ulo_off_peak",
+            "sensor.nx": iso,
+            "sensor.next_rate": "0.24",
+        }
+    )
+    mgr = TouManager(hass)
+    base: dict = {
+        "tou_enabled": True,
+        "tou_period_entity": "sensor.period",
+        "tou_next_change_entity": "sensor.nx",
+        "tou_next_rate_entity": "sensor.next_rate",
+        "tou_next_change_tier": "off",  # fixed-tier choice must not win over the rate
+        "tou_peak_threshold": 0.20,
+    }
+
+    timeline = await mgr.async_build_timeline({**base, "tou_lookahead": "next_change_rate"})
+    assert timeline is not None
+    assert timeline.tier_at(now + 60) == TOU_TIER_OFF
+    assert timeline.tier_at(future + 30) == TOU_TIER_PEAK
+
+    # explicit fixed-tier mode ignores the rate sensor entirely.
+    timeline = await mgr.async_build_timeline({**base, "tou_lookahead": "next_change"})
+    assert timeline is not None
+    assert timeline.tier_at(future + 30) == TOU_TIER_OFF
+
+    # legacy auto with no tier selected: a bound rate sensor is still used.
+    timeline = await mgr.async_build_timeline({**base, "tou_next_change_tier": "", "tou_lookahead": "auto"})
+    assert timeline is not None and timeline.tier_at(future + 30) == TOU_TIER_PEAK
+
+    # unavailable next rate -> no guessing; the lookahead stays off.
+    hass.states.get = MagicMock(
+        side_effect={
+            "sensor.period": _state("ulo_off_peak"),
+            "sensor.nx": _state(iso),
+            "sensor.next_rate": _state("unavailable"),
+        }.get
+    )
+    timeline = await mgr.async_build_timeline({**base, "tou_lookahead": "next_change_rate"})
+    assert timeline is not None and len(timeline.segments) == 1
+
+
+@pytest.mark.asyncio
 async def test_calendar_service_failure_is_graceful() -> None:
     hass = _make_hass({"sensor.rate_period": "ulo_on_peak"})
     hass.services.async_call = AsyncMock(side_effect=RuntimeError("boom"))
@@ -499,6 +550,43 @@ def test_coast_window_tier_window_and_cap() -> None:
     assert adjust is not None
     assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 19.0
     assert adjust(boundary + 91 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
+
+
+def test_coast_window_any_tier_end() -> None:
+    """'' as the tier_window value ends the coast at the next change of any tier."""
+    mgr = TouManager(_make_hass({}))
+    now = time.time()
+    b1 = now + 60.0
+    b2 = now + 120.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=now, end=b1, tier=TOU_TIER_OFF),
+            TouSegment(start=b1, end=b2, tier=TOU_TIER_PEAK),
+            TouSegment(start=b2, end=now + 16 * 3600.0, tier=TOU_TIER_OFF),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    settings = {
+        "tou_coast_rules": [
+            {
+                "id": "r-any",
+                "name": "any",
+                "enabled": True,
+                "rooms": ["living"],
+                "trigger": {"from_tier": "off", "to_tier": "peak"},
+                "coast_temp": 19.0,
+                "end": {"mode": "tier_window", "value": ""},
+                "post_hold": "schedule",
+            }
+        ]
+    }
+    adjust = mgr.make_adjuster(_room(), settings)
+    assert adjust is not None
+    assert adjust(b1 + 5.0, TargetTemps(heat=21.0, cool=24.0)).heat == 19.0
+    # after the peak->off boundary nothing is coasted and the tier is plain off:
+    # the schedule target returns untouched.
+    assert adjust(b2 + 5.0, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
 
 
 def test_coast_rule_requires_matching_room_and_enabled() -> None:

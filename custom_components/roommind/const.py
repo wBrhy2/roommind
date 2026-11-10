@@ -266,7 +266,7 @@ TOU_MODES = [TOU_MODE_OFF, TOU_MODE_SETBACK, TOU_MODE_SETBACK_BOOST]
 # calendars -> next-change) so existing installs are unchanged until the user
 # picks a mode explicitly.
 TOU_TIER_SOURCES = ["auto", "period", "rate", "flags"]
-TOU_LOOKAHEADS = ["auto", "calendar", "next_change", "none"]
+TOU_LOOKAHEADS = ["auto", "calendar", "next_change_rate", "next_change", "none"]
 
 # Coast-rule end modes and post-hold behavior.
 TOU_END_MODES = ["duration", "clock", "tier_window"]

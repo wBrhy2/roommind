@@ -3429,6 +3429,35 @@ async def test_save_settings_tou_tier_window_value(ws_hass, store, connection):
 
 
 @pytest.mark.asyncio
+async def test_save_settings_tou_any_tier_window(ws_hass, store, connection):
+    """A tier_window coast rule may wait for ANY change (value '')."""
+    await store.async_load()
+
+    msg = {
+        "id": 65,
+        "type": "roommind/settings/save",
+        "tou_next_rate_entity": "sensor.hydro_one_next_rate",
+        "tou_coast_rules": [
+            {
+                "id": "any",
+                "name": "wait for whatever",
+                "rooms": ["living_room"],
+                "trigger": {"from_tier": "off", "to_tier": ""},
+                "coast_temp": 18.0,
+                "end": {"mode": "tier_window", "value": ""},
+                "post_hold": "stay",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    settings = connection.send_result.call_args[0][1]["settings"]
+    assert settings["tou_next_rate_entity"] == "sensor.hydro_one_next_rate"
+    assert settings["tou_coast_rules"][0]["end"] == {"mode": "tier_window", "value": ""}
+
+
+@pytest.mark.asyncio
 async def test_save_room_tou_fields(ws_hass, store, connection):
     """Per-room Time-of-Use fields persist on the room."""
     await store.async_load()

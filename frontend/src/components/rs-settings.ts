@@ -81,6 +81,7 @@ export class RsSettings extends LitElement {
   @state() private _touRateEntity = "";
   @state() private _touPeriodEntity = "";
   @state() private _touNextChangeEntity = "";
+  @state() private _touNextRateEntity = "";
   @state() private _touNextChangeTier = "peak";
   @state() private _touCalendarEntities: TouCalendarBinding[] = [];
   @state() private _touFlagEntities: Record<string, string> = {};
@@ -168,6 +169,7 @@ export class RsSettings extends LitElement {
       this._touRateEntity = s.tou_rate_entity ?? "";
       this._touPeriodEntity = s.tou_period_entity ?? "";
       this._touNextChangeEntity = s.tou_next_change_entity ?? "";
+      this._touNextRateEntity = s.tou_next_rate_entity ?? "";
       this._touNextChangeTier = s.tou_next_change_tier ?? "peak";
       this._touCalendarEntities = s.tou_calendar_entities ?? [];
       this._touFlagEntities = s.tou_flag_entities ?? {};
@@ -353,6 +355,7 @@ export class RsSettings extends LitElement {
           .touRateEntity=${this._touRateEntity}
           .touPeriodEntity=${this._touPeriodEntity}
           .touNextChangeEntity=${this._touNextChangeEntity}
+          .touNextRateEntity=${this._touNextRateEntity}
           .touNextChangeTier=${this._touNextChangeTier}
           .touCalendarEntities=${this._touCalendarEntities}
           .touFlagEntities=${this._touFlagEntities}
@@ -556,6 +559,7 @@ export class RsSettings extends LitElement {
         tou_rate_entity: this._touRateEntity,
         tou_period_entity: this._touPeriodEntity,
         tou_next_change_entity: this._touNextChangeEntity,
+        tou_next_rate_entity: this._touNextRateEntity,
         tou_next_change_tier: this._touNextChangeTier,
         tou_calendar_entities: this._touCalendarEntities.filter((c) => c.entity_id),
         tou_flag_entities: Object.fromEntries(

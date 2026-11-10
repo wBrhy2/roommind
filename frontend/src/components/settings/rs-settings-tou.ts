@@ -58,6 +58,7 @@ export class RsSettingsTou extends LitElement {
   @property({ type: String }) public touRateEntity = "";
   @property({ type: String }) public touPeriodEntity = "";
   @property({ type: String }) public touNextChangeEntity = "";
+  @property({ type: String }) public touNextRateEntity = "";
   @property({ type: String }) public touNextChangeTier: TouTier | "" = "peak";
   @property({ type: Array }) public touCalendarEntities: TouCalendarBinding[] = [];
   @property({ attribute: false }) public touFlagEntities: Record<string, string> = {};
@@ -222,8 +223,9 @@ export class RsSettingsTou extends LitElement {
   private _lookaheadMode(): Exclude<TouLookahead, "auto"> {
     if (this.touLookahead !== "auto") return this.touLookahead;
     if (this.touCalendarEntities.some((c) => c.entity_id)) return "calendar";
+    if (this.touNextRateEntity) return "next_change_rate";
     if (this.touNextChangeEntity) return "next_change";
-    return "none";
+    return "next_change_rate";
   }
 
   render() {
@@ -338,6 +340,14 @@ export class RsSettingsTou extends LitElement {
               )}
               ${this._radioOption(
                 "tou_look",
+                "tou.lk.next_rate",
+                "tou.lk.next_rate_desc",
+                "next_change_rate",
+                look,
+                (v) => this._fire("touLookahead", v),
+              )}
+              ${this._radioOption(
+                "tou_look",
                 "tou.lk.next_change",
                 "tou.lk.next_change_desc",
                 "next_change",
@@ -367,27 +377,39 @@ export class RsSettingsTou extends LitElement {
                     : nothing
                 }
                 ${
-                  look === "next_change"
-                    ? html`<div class="picker-row">
+                  look === "next_change_rate"
+                    ? html`${this._nextChangeTimeRow()}
+                        <div class="picker-row">
                           <ha-entity-picker
                             .hass=${this.hass}
-                            .value=${this.touNextChangeEntity}
-                            .includeDomains=${["sensor", "input_datetime"]}
-                            .label=${localize("tou.next_change_entity", l)}
+                            .value=${this.touNextRateEntity}
+                            .includeDomains=${["sensor", "input_number"]}
+                            .label=${localize("tou.next_rate_entity", l)}
                             @value-changed=${(e: CustomEvent) =>
-                              this._fire("touNextChangeEntity", (e.detail?.value as string) ?? "")}
+                              this._fire("touNextRateEntity", (e.detail?.value as string) ?? "")}
                           ></ha-entity-picker>
                           ${
-                            this.touNextChangeEntity
+                            this.touNextRateEntity
                               ? html`<ha-icon-button
                                   .path=${CLOSE_ICON}
                                   .label=${localize("tou.clear", l)}
-                                  @click=${() => this._fire("touNextChangeEntity", "")}
+                                  @click=${() => this._fire("touNextRateEntity", "")}
                                 ></ha-icon-button>`
                               : nothing
                           }
                         </div>
-                        ${this._renderNextTierSelect()}
+                        <div class="hint">${localize("tou.next_rate_hint", l)}</div>
+                        <div class="section-label">${localize("tou.thresholds", l)}</div>
+                        <div class="tier-grid">
+                          ${this._optionalNumberField("tou_peak_threshold", localize("tou.peak_threshold", l))}
+                          ${this._optionalNumberField("tou_mid_threshold", localize("tou.mid_threshold", l))}
+                          ${this._optionalNumberField("tou_ultra_threshold", localize("tou.ultra_threshold", l))}
+                        </div>`
+                    : nothing
+                }
+                ${
+                  look === "next_change"
+                    ? html`${this._nextChangeTimeRow()} ${this._renderNextTierSelect()}
                         <div class="hint">${localize("tou.next_change_tier_hint", l)}</div>`
                     : nothing
                 }
@@ -503,6 +525,29 @@ export class RsSettingsTou extends LitElement {
         @value-changed=${(e: CustomEvent) => this._fire("touRateEntity", (e.detail?.value as string) ?? "")}
       ></ha-entity-picker>
       <div class="hint">${localize("tou.rate_aux_hint", l)}</div>
+    </div>`;
+  }
+
+  /** Timestamp picker shared by both next-change lookahead modes. */
+  private _nextChangeTimeRow() {
+    const l = this.hass.language;
+    return html`<div class="picker-row">
+      <ha-entity-picker
+        .hass=${this.hass}
+        .value=${this.touNextChangeEntity}
+        .includeDomains=${["sensor", "input_datetime"]}
+        .label=${localize("tou.next_change_entity", l)}
+        @value-changed=${(e: CustomEvent) => this._fire("touNextChangeEntity", (e.detail?.value as string) ?? "")}
+      ></ha-entity-picker>
+      ${
+        this.touNextChangeEntity
+          ? html`<ha-icon-button
+              .path=${CLOSE_ICON}
+              .label=${localize("tou.clear", l)}
+              @click=${() => this._fire("touNextChangeEntity", "")}
+            ></ha-icon-button>`
+          : nothing
+      }
     </div>`;
   }
 
@@ -734,11 +779,15 @@ export class RsSettingsTou extends LitElement {
             rule.end.mode === "tier_window"
               ? html`<ha-select
                   .label=${localize("tou.rule_end_tier", l)}
-                  .value=${String(rule.end.value)}
-                  .options=${TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) }))}
+                  .value=${rule.end.value === "" ? ANY_TIER : String(rule.end.value)}
+                  .options=${[
+                    { value: ANY_TIER, label: localize("tou.rule_end_tier_any", l) },
+                    ...TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) })),
+                  ]}
                   @selected=${(e: Event) => {
                     const v = getSelectValue(e);
-                    if (v !== null) update({ end: { ...rule.end, value: v } });
+                    if (v !== null)
+                      update({ end: { ...rule.end, value: v === ANY_TIER ? "" : v } });
                   }}
                   @closed=${(e: Event) => e.stopPropagation()}
                   fixedMenuPosition
