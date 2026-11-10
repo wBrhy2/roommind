@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "RoomMind",
+        "description": "Set up RoomMind to manage room climate. Rooms are configured in the RoomMind panel after setup."
+      }
+    },
+    "abort": {
+      "already_configured": "RoomMind is already configured."
+    }
+  },
+  "issues": {
+    "restart_required": {
+      "title": "Restart required",
+      "fix_flow": {
+        "step": {
+          "confirm_restart": {
+            "title": "Restart Home Assistant?",
+            "description": "RoomMind {version} has been installed but Home Assistant is still running an older version. Restart to complete the update."
+          }
+        }
+      }
+    },
+    "deprecated_entities": {
+      "title": "RoomMind entities to replace",
+      "description": "Each room now has one climate entity (`climate.roommind_` plus the room ID) that shows and controls the room: target temperature, comfort/eco presets, mode and what RoomMind is doing right now. The old per-room entities keep working for now but will be removed in a future release. These are still referenced directly by automations or scripts:\n\n{entities}\n\nWhat to use instead:\n- target temperature sensor → the target temperature of the climate entity\n- mode sensor → its `hvac_action`\n- override entity → `climate.set_temperature` or a preset on the climate entity (holds until the next schedule change, preset Schedule (`none`) returns to the schedule)\n\nThis notice goes away once nothing uses them any more (checked when Home Assistant starts)."
+    }
+  },
+  "entity": {
+    "climate": {
+      "room": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Schedule",
+              "manual": "Manual"
+            }
+          }
+        }
+      }
+    }
+  }
+}

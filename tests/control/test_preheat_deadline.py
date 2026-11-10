@@ -1,0 +1,221 @@
+"""Pre-heating starts as late as possible so a rising heat target is reached in time."""
+
+from __future__ import annotations
+
+import time
+from unittest.mock import MagicMock
+
+import pytest
+
+from custom_components.roommind.const import TargetTemps
+from custom_components.roommind.control.mpc_controller import (
+    MAX_HORIZON_HOURS,
+    MODE_HEATING,
+    MODE_IDLE,
+    PLAN_DT_MINUTES,
+    MPCController,
+    clear_command_cache,
+    compute_horizon_blocks,
+)
+from custom_components.roommind.control.mpc_optimizer import MPCOptimizer, MPCPlan
+from custom_components.roommind.control.thermal_model import RCModel, RoomModelManager
+
+from .conftest import build_hass, make_room
+
+# Room with a radiator sized to its heat load: 0.56 K/h at full power, tau ~70 h
+SLOW = RCModel(C=1.0, U=0.014, Q_heat=0.56, Q_cool=4.0)
+
+
+def _plan(model, T_room, rise_at, *, n=72, eco=17.5, comfort=20.0, initial_mode=MODE_IDLE, can_heat=True):
+    opt = MPCOptimizer(model, can_heat=can_heat, can_cool=False)
+    heat = [eco] * rise_at + [comfort] * (n - rise_at)
+    return opt.optimize(
+        T_room=T_room,
+        T_outdoor_series=[0.0] * n,
+        heat_target_series=heat,
+        dt_minutes=5,
+        initial_mode=initial_mode,
+    )
+
+
+def test_heats_now_when_waiting_would_miss_the_comfort_block():
+    plan = _plan(SLOW, 18.0, rise_at=36)  # +2 K in 3 h needs ~4 h at 0.56 K/h
+    assert plan.actions[0] == MODE_HEATING
+    assert plan.power_fractions[0] == 1.0
+    assert plan.preheat_blocks == 36
+
+
+def test_waits_while_a_later_start_still_reaches_the_target():
+    plan = _plan(SLOW, 19.5, rise_at=60)  # +0.5 K in 5 h: plenty of time
+    assert plan.actions[0] == MODE_IDLE
+    assert plan.preheat_blocks == 0
+
+
+def test_no_rise_no_preheat():
+    plan = _plan(SLOW, 18.0, rise_at=72)
+    assert plan.actions[0] == MODE_IDLE
+    assert plan.preheat_blocks == 0
+
+
+def test_running_preheat_keeps_going_at_the_deadline_edge():
+    # Waiting one block would still make it, so a fresh start waits ...
+    assert _plan(SLOW, 19.5, rise_at=20).actions[0] == MODE_IDLE
+    # ... but a pre-heat already running keeps going instead of toggling at the edge
+    plan = _plan(SLOW, 19.5, rise_at=20, initial_mode=MODE_HEATING)
+    assert plan.actions[0] == MODE_HEATING
+    assert plan.preheat_blocks == 20
+
+
+def test_running_preheat_stops_at_the_target():
+    plan = _plan(SLOW, 19.95, rise_at=24, initial_mode=MODE_HEATING)
+    assert plan.actions[0] == MODE_IDLE
+
+
+def test_no_preheat_without_heating():
+    plan = _plan(SLOW, 18.0, rise_at=36, can_heat=False)
+    assert plan.actions[0] == MODE_IDLE
+    assert plan.preheat_blocks == 0
+
+
+def test_horizon_uses_the_slower_rate_and_is_capped():
+    # Heat-only room: the untrained cooling default (4 K/h) must not shorten the horizon
+    blocks = compute_horizon_blocks(SLOW, 18.0, 17.5)
+    assert blocks * PLAN_DT_MINUTES / 60 > 6
+    very_slow = RCModel(C=1.0, U=0.01, Q_heat=0.05, Q_cool=4.0)
+    assert compute_horizon_blocks(very_slow, 18.0, 17.5) == MAX_HORIZON_HOURS * 60 // PLAN_DT_MINUTES
+
+
+@pytest.fixture(autouse=True)
+def _clean_cache():
+    clear_command_cache()
+    yield
+    clear_command_cache()
+
+
+def _controller(monkeypatch, plan: MPCPlan, rise_after_s: float):
+    start = time.time()
+
+    def resolve(ts: float) -> TargetTemps:
+        return TargetTemps(20.0, None) if ts >= start + rise_after_s else TargetTemps(17.5, None)
+
+    hass = build_hass()
+    state = MagicMock()
+    state.state = "heat"
+    state.attributes = {"hvac_modes": ["heat", "off"], "min_temp": 5.0, "max_temp": 30.0}
+    hass.states.get = MagicMock(return_value=state)
+    ctrl = MPCController(
+        hass,
+        make_room(climate_mode="heat_only", heating_system_type="radiator"),
+        model_manager=RoomModelManager(),
+        outdoor_temp=0.0,
+        settings={},
+        has_external_sensor=True,
+        target_resolver=resolve,
+        heating_system_type="radiator",
+    )
+    monkeypatch.setattr(
+        "custom_components.roommind.control.mpc_controller.MPCOptimizer.optimize",
+        lambda *a, **kw: plan,
+    )
+    return ctrl
+
+
+def test_guard_looks_as_far_ahead_as_the_preheat(monkeypatch):
+    """Room above the eco target, comfort 90 min out: the 30-min guard would cancel the pre-heat."""
+    plan = MPCPlan(actions=[MODE_HEATING] * 24, temperatures=[18.0] * 25, power_fractions=[1.0] * 24, preheat_blocks=18)
+    ctrl = _controller(monkeypatch, plan, 90 * 60)
+    assert ctrl._evaluate_mpc(18.0, TargetTemps(17.5, None))[0] == MODE_HEATING
+
+
+def test_without_preheat_the_guard_keeps_the_short_window(monkeypatch):
+    plan = MPCPlan(actions=[MODE_HEATING] * 24, temperatures=[18.0] * 25, power_fractions=[1.0] * 24)
+    ctrl = _controller(monkeypatch, plan, 90 * 60)
+    assert ctrl._evaluate_mpc(18.0, TargetTemps(17.5, None))[0] == MODE_IDLE
+
+
+def test_an_eco_holding_run_does_not_turn_into_an_early_preheat():
+    """A run holding the eco target ends normally; comfort 6 h out (~2 h needed) is no reason to keep heating."""
+    medium = RCModel(C=1.0, U=0.014, Q_heat=1.5, Q_cool=4.0)
+    plan = _plan(medium, 17.6, rise_at=72, n=96, initial_mode=MODE_HEATING)
+    assert plan.actions[0] == MODE_IDLE
+    assert plan.preheat_blocks == 0
+
+
+def test_slider_limits_the_preheat_lead():
+    from custom_components.roommind.control.mpc_optimizer import preheat_max_blocks
+
+    assert preheat_max_blocks(70) is None
+    assert preheat_max_blocks(100) is None
+    assert preheat_max_blocks(35) == 72  # 6 h
+    assert preheat_max_blocks(0) == 0
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected"), [(None, MODE_HEATING), (48, MODE_HEATING), (24, MODE_IDLE), (0, MODE_IDLE)]
+)
+def test_efficiency_setting_starts_no_earlier_than_allowed(limit, expected):
+    """Comfort 3 h out needs ~4 h: full comfort pre-heats now, efficiency waits."""
+    opt = MPCOptimizer(SLOW, can_heat=True, can_cool=False, preheat_max_blocks=limit)
+    plan = opt.optimize(
+        T_room=18.0,
+        T_outdoor_series=[0.0] * 72,
+        heat_target_series=[17.5] * 36 + [20.0] * 36,
+        dt_minutes=5,
+    )
+    assert plan.actions[0] == expected
+
+
+def test_controller_and_analytics_take_the_limit_from_the_slider():
+    ctrl = MPCController(
+        build_hass(),
+        make_room(),
+        model_manager=RoomModelManager(),
+        outdoor_temp=0.0,
+        settings={"comfort_weight": 0},
+        has_external_sensor=True,
+    )
+    assert ctrl._preheat_max_blocks == 0
+
+
+def test_room_switch_turns_the_preheat_lead_off():
+    """Pre-heating off for a room (#478): no lead, whatever the slider says."""
+    from custom_components.roommind.control.mpc_optimizer import preheat_max_blocks
+
+    assert preheat_max_blocks(70, enabled=False) == 0
+    assert preheat_max_blocks(100, enabled=False) == 0
+    assert preheat_max_blocks(70, enabled=True) is None
+
+
+@pytest.mark.parametrize(("room_value", "expected"), [(False, 0), (True, None), ("missing", None)])
+def test_controller_reads_the_room_switch(room_value, expected):
+    room = make_room() if room_value == "missing" else make_room(preheat_enabled=room_value)
+    ctrl = MPCController(
+        build_hass(),
+        room,
+        model_manager=RoomModelManager(),
+        outdoor_temp=0.0,
+        settings={"comfort_weight": 70},
+        has_external_sensor=True,
+    )
+    assert ctrl._preheat_max_blocks == expected
+
+
+def test_analytics_reads_the_room_switch():
+    from unittest.mock import patch
+
+    from custom_components.roommind.control import analytics_simulator
+
+    seen = []
+    real = analytics_simulator.MPCOptimizer
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("preheat_max_blocks"))
+        return real(*args, **kwargs)
+
+    forecast = [{"target_temp": 17.5, "heat_target": 17.5, "cool_target": 30.0}] * 6
+    room = make_room(preheat_enabled=False, climate_mode="heat_only")
+    with patch.object(analytics_simulator, "MPCOptimizer", side_effect=spy):
+        analytics_simulator._simulate_mpc(
+            SLOW, forecast, [0.0] * 6, current_temp=18.0, room_config=room, settings={"comfort_weight": 70}
+        )
+    assert seen and all(v == 0 for v in seen)

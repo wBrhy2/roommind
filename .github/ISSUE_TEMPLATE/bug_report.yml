@@ -1,0 +1,58 @@
+name: 🐛 Bug Report
+description: Report a bug in RoomMind
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: RoomMind version
+      description: Found in Settings → Devices & Services → RoomMind
+      placeholder: "1.6.0"
+    validations:
+      required: true
+
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      description: Found in Settings → About
+      placeholder: "2025.3.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What was the expected behavior? Since when / after which update does this occur?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can the issue be reproduced?
+      placeholder: |
+        1. Go to ...
+        2. Click on ...
+        3. See error
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        Please download and attach the diagnostics file:
+        Settings → Devices & Services → RoomMind → ⋮ → Download diagnostics
+        This contains room config and system state (no credentials) and **significantly speeds up diagnosing and fixing the issue.**
+      placeholder: "Drag & drop the diagnostics JSON file here, or paste its contents."
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: |
+        Paste any relevant logs from Settings → System → Logs (filter for "roommind").
+        For UI bugs, also check the browser console (F12 → Console tab).
+      render: text

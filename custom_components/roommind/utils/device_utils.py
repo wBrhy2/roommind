@@ -1,0 +1,456 @@
+"""Device helper utilities for the unified device model.
+
+Pure utility module with NO dependencies on HA or other RoomMind modules.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, NamedTuple
+
+_LOGGER = logging.getLogger(__name__)
+
+DEVICE_TYPE_TRV = "trv"
+DEVICE_TYPE_AC = "ac"
+VALID_DEVICE_TYPES = {DEVICE_TYPE_TRV, DEVICE_TYPE_AC}
+
+DEVICE_ROLE_AUTO = "auto"
+
+VALID_HEATING_SYSTEM_TYPES = {"", "radiator", "underfloor"}
+
+# Heating system type priority: higher = longer residual heat tau
+HST_PRIORITY = {"underfloor": 2, "radiator": 1, "": 0}
+
+IDLE_ACTION_OFF = "off"
+IDLE_ACTION_FAN_ONLY = "fan_only"
+DEFAULT_IDLE_FAN_MODE = "low"
+IDLE_ACTION_SETBACK = "setback"
+IDLE_ACTION_LOW = "low"
+DEFAULT_IDLE_SETBACK_OFFSET = 2.0
+
+# What the second valve entity of a TRV with direct valve control means (#482): a closing
+# degree (SONOFF TRVZB, closed position = 100 - value) or the opening while the TRV does
+# not heat (SONOFF TRV-ZBT). Missing = closing degree.
+VALVE_CLOSING_DEGREE = "closing_degree"
+VALVE_IDLE_OPENING = "idle_opening"
+VALVE_CLOSING_MODES = (VALVE_CLOSING_DEGREE, VALVE_IDLE_OPENING)
+
+SETPOINT_MODE_PROPORTIONAL = "proportional"
+SETPOINT_MODE_DIRECT = "direct"
+
+# Per-device offset (°C) added to the room target in direct mode, for devices
+# whose internal sensor reads differently from the room sensor (#369).
+SETPOINT_OFFSET_MIN = -5.0
+SETPOINT_OFFSET_MAX = 5.0
+SETPOINT_OFFSET_STEP = 0.5
+
+# --- Coil dry (evaporator anti-odour run) ---
+# These live here, not in const.py, because get_coil_dry_config() resolves them
+# and this module is deliberately free of HA / RoomMind imports.  Same
+# precedent as IDLE_ACTION_* above.
+COIL_DRY_INHERIT = "inherit"
+COIL_DRY_ON = "on"
+COIL_DRY_OFF = "off"
+COIL_DRY_OVERRIDES = [COIL_DRY_INHERIT, COIL_DRY_ON, COIL_DRY_OFF]
+
+COIL_DRY_MODE_FAN_ONLY = "fan_only"
+COIL_DRY_MODE_DRY = "dry"
+COIL_DRY_MODES = [COIL_DRY_MODE_FAN_ONLY, COIL_DRY_MODE_DRY]
+
+# Device-level sentinel: "" means "inherit the global setting", so an explicit
+# "keep the device's current fan speed" needs its own value.
+COIL_DRY_FAN_MODE_KEEP = "__keep__"
+
+COIL_DRY_PHASE_DRAIN = "drain"
+COIL_DRY_PHASE_BLOW = "blow"
+
+DEFAULT_COIL_DRY_MINUTES = 20  # low fan speed by default -> double the 10 min
+DEFAULT_COIL_DRY_FAN_MODE = "low"  # HA's FAN_LOW: quiet beats fast, see spec 6.4
+DEFAULT_COIL_DRY_MIN_COOLING_MINUTES = 10
+DEFAULT_COIL_DRY_DRAIN_MINUTES = 0
+COIL_DRY_STALE_SECONDS = 7200.0  # 2 h: accumulated wetness expires, run too late
+
+
+class CoilDryConfig(NamedTuple):
+    """Resolved coil dry configuration for one device."""
+
+    enabled: bool
+    minutes: int
+    mode: str
+    fan_mode: str  # "" = keep the device's current fan speed
+    min_cooling_minutes: int
+    drain_minutes: int
+
+
+# Active HVAC modes that indicate real device capabilities.
+_ACTIVE_HVAC_MODES = {"heat", "cool", "heat_cool", "auto"}
+
+
+def has_reliable_hvac_modes(state: Any) -> bool:
+    """Check if a device's hvac_modes attribute is trustworthy.
+
+    Some integrations report only limited modes like ``["off", "fan_only"]``
+    regardless of device state, hiding actual capabilities (see #100).
+    Returns *False* when modes are likely incomplete.
+    """
+    if state is None:
+        return False
+    modes = set(state.attributes.get("hvac_modes") or [])
+    return bool(modes & _ACTIVE_HVAC_MODES)
+
+
+def legacy_to_devices(
+    thermostats: list[str],
+    acs: list[str],
+    heating_system_type: str = "",
+) -> list[dict]:
+    """Create devices[] from legacy thermostats/acs lists.
+
+    heating_system_type is transferred to TRV devices (was previously room-level).
+    ACs get "" (no heating system profile).
+    """
+    devices: list[dict] = []
+    for eid in thermostats:
+        devices.append(
+            {
+                "entity_id": eid,
+                "type": DEVICE_TYPE_TRV,
+                "role": DEVICE_ROLE_AUTO,
+                "heating_system_type": heating_system_type,
+                "idle_action": IDLE_ACTION_OFF,
+                "idle_fan_mode": DEFAULT_IDLE_FAN_MODE,
+                "setpoint_mode": SETPOINT_MODE_PROPORTIONAL,
+                "coil_dry": COIL_DRY_INHERIT,
+                "coil_dry_minutes": 0,
+                "coil_dry_mode": "",
+                "coil_dry_fan_mode": "",
+            }
+        )
+    for eid in acs:
+        devices.append(
+            {
+                "entity_id": eid,
+                "type": DEVICE_TYPE_AC,
+                "role": DEVICE_ROLE_AUTO,
+                "heating_system_type": "",
+                "idle_action": IDLE_ACTION_OFF,
+                "idle_fan_mode": DEFAULT_IDLE_FAN_MODE,
+                "setpoint_mode": SETPOINT_MODE_PROPORTIONAL,
+                "coil_dry": COIL_DRY_INHERIT,
+                "coil_dry_minutes": 0,
+                "coil_dry_mode": "",
+                "coil_dry_fan_mode": "",
+            }
+        )
+    return devices
+
+
+def devices_to_legacy(devices: list[dict]) -> tuple[list[str], list[str]]:
+    """Extract thermostats/acs lists from devices[].
+
+    TRV -> thermostats, AC -> acs.
+    Devices with unknown types or missing entity_id are logged and skipped.
+    """
+    thermostats: list[str] = []
+    acs: list[str] = []
+    for d in devices:
+        eid = d.get("entity_id")
+        if not eid:
+            _LOGGER.warning("Skipping device with missing entity_id: %s", d)
+            continue
+        dtype = d.get("type")
+        if dtype == DEVICE_TYPE_TRV:
+            thermostats.append(eid)
+        elif dtype == DEVICE_TYPE_AC:
+            acs.append(eid)
+        else:
+            _LOGGER.warning("Skipping device with unknown type '%s': %s", dtype, eid)
+    return thermostats, acs
+
+
+def ensure_room_has_devices(room: dict) -> dict:
+    """One-time migration + read-time safety net.
+
+    - No 'devices' key: generate from legacy + room-level heating_system_type
+    - 'devices' present but inconsistent with legacy: prefer legacy (downgrade recovery)
+    - 'devices' present and consistent: regenerate legacy from devices
+    Mutates and returns room.
+    """
+    if "devices" not in room:
+        room["devices"] = legacy_to_devices(
+            room.get("thermostats", []),
+            room.get("acs", []),
+            room.get("heating_system_type", ""),
+        )
+    else:
+        # Downgrade recovery: if legacy fields were edited while devices was stale,
+        # the legacy entity sets won't match devices. Prefer legacy in that case.
+        expected_t, expected_a = devices_to_legacy(room["devices"])
+        actual_t = room.get("thermostats", [])
+        actual_a = room.get("acs", [])
+        if set(expected_t) != set(actual_t) or set(expected_a) != set(actual_a):
+            _LOGGER.info(
+                "Device list inconsistent with legacy fields for room '%s', "
+                "re-generating devices from legacy (downgrade recovery)",
+                room.get("area_id", "unknown"),
+            )
+            room["devices"] = legacy_to_devices(
+                actual_t,
+                actual_a,
+                room.get("heating_system_type", ""),
+            )
+    # Always regenerate legacy from devices (devices is source of truth after migration)
+    thermostats, acs = devices_to_legacy(room["devices"])
+    room["thermostats"] = thermostats
+    room["acs"] = acs
+    # Room-level heating_system_type derived from devices for backend compat
+    room["heating_system_type"] = get_room_heating_system_type(room["devices"])
+    return room
+
+
+def get_room_heating_system_type(devices: list[dict]) -> str:
+    """Return the most conservative heating_system_type for a room.
+
+    With mixed types (e.g., radiator TRV + underfloor TRV), the one with the
+    longest residual heat tau wins:
+    underfloor (tau=90min) > radiator (tau=10min) > "" (no residual heat).
+    Only TRV devices are considered (ACs/HPs have no heating system profile).
+    """
+    best = ""
+    for d in devices:
+        if d.get("type") != DEVICE_TYPE_TRV:
+            continue
+        hst = d.get("heating_system_type", "")
+        if HST_PRIORITY.get(hst, 0) > HST_PRIORITY.get(best, 0):
+            best = hst
+    return best
+
+
+def get_all_entity_ids(devices: list[dict]) -> list[str]:
+    """All entity_ids from devices, TRVs first for deterministic ordering.
+
+    Preserves relative order within each group (TRV, non-TRV).
+    This matters for functions like _read_device_temp that take the first
+    entity with a valid value.
+    """
+    trvs = [d["entity_id"] for d in devices if "entity_id" in d and d.get("type") == DEVICE_TYPE_TRV]
+    others = [d["entity_id"] for d in devices if "entity_id" in d and d.get("type") != DEVICE_TYPE_TRV]
+    return trvs + others
+
+
+def get_entity_ids_by_type(devices: list[dict], *types: str) -> list[str]:
+    """Entity IDs filtered by type(s)."""
+    return [d["entity_id"] for d in devices if "entity_id" in d and d.get("type") in types]
+
+
+def get_trv_eids(devices: list[dict]) -> list[str]:
+    """Shortcut for get_entity_ids_by_type(devices, "trv")."""
+    return get_entity_ids_by_type(devices, DEVICE_TYPE_TRV)
+
+
+def get_ac_eids(devices: list[dict]) -> list[str]:
+    """Shortcut for get_entity_ids_by_type(devices, "ac")."""
+    return get_entity_ids_by_type(devices, DEVICE_TYPE_AC)
+
+
+def get_device_by_eid(devices: list[dict], entity_id: str) -> dict | None:
+    """Find a single device by entity_id."""
+    for d in devices:
+        if d.get("entity_id") == entity_id:
+            return d
+    return None
+
+
+def is_trv_type(device: dict) -> bool:
+    """True if device type is TRV."""
+    return device.get("type") == DEVICE_TYPE_TRV
+
+
+def is_ac_type(device: dict) -> bool:
+    """True if device type is AC."""
+    return device.get("type") == DEVICE_TYPE_AC
+
+
+def get_idle_action(devices: list[dict], entity_id: str) -> tuple[str, str]:
+    """Return (idle_action, idle_fan_mode) for a device."""
+    dev = get_device_by_eid(devices, entity_id)
+    if dev is None:
+        return (IDLE_ACTION_OFF, DEFAULT_IDLE_FAN_MODE)
+    return (
+        dev.get("idle_action", IDLE_ACTION_OFF),
+        dev.get("idle_fan_mode", DEFAULT_IDLE_FAN_MODE),
+    )
+
+
+def get_setback_auto_off(devices: list[dict], entity_id: str) -> bool:
+    """True if a setback device may be switched off after a long idle with no run ahead (#255)."""
+    dev = get_device_by_eid(devices, entity_id)
+    return bool(dev and dev.get("setback_auto_off", False))
+
+
+def get_direct_setpoint_eids(devices: list[dict]) -> set[str]:
+    """Return entity IDs of devices with setpoint_mode='direct'."""
+    return {d["entity_id"] for d in devices if d.get("entity_id") and _is_direct(d)}
+
+
+def _is_direct(device: dict) -> bool:
+    """Direct setpoint mode; a TRV with direct valve control (#413) always gets the boost."""
+    return device.get("setpoint_mode") == SETPOINT_MODE_DIRECT and not (
+        device.get("type") == DEVICE_TYPE_TRV
+        and device.get("valve_opening_entity")
+        and device.get("valve_closing_entity")
+    )
+
+
+def get_setpoint_offset(devices: list[dict], entity_id: str) -> float:
+    """Return the direct-mode setpoint offset (°C) of a device, 0.0 if unset, invalid or not direct."""
+    dev = get_device_by_eid(devices, entity_id)
+    if dev is None or not _is_direct(dev):
+        return 0.0
+    try:
+        offset = float(dev.get("setpoint_offset") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if offset != offset:  # NaN
+        return 0.0
+    return max(SETPOINT_OFFSET_MIN, min(SETPOINT_OFFSET_MAX, offset))
+
+
+def get_setpoint_offsets(devices: list[dict]) -> dict[str, float]:
+    """Return {entity_id: offset} for direct-mode devices with a non-zero offset."""
+    offsets = {d["entity_id"]: get_setpoint_offset(devices, d["entity_id"]) for d in devices if d.get("entity_id")}
+    return {eid: off for eid, off in offsets.items() if off}
+
+
+class ValveEntities(NamedTuple):
+    """Number entities of a TRV with direct valve control (#413)."""
+
+    opening: str
+    closing: str
+    idle_opening: bool = False  # ``closing`` is the opening while idle, not a closing degree (#482)
+
+
+def get_valve_entities(devices: list[dict]) -> dict[str, ValveEntities]:
+    """Return {climate_entity_id: ValveEntities} for TRVs with direct valve control (#413).
+
+    Both entities are needed: the second one sets where the valve sits while the TRV's own
+    controller does not heat, so only both together pin the valve at X %.
+    """
+    result: dict[str, ValveEntities] = {}
+    for d in devices:
+        eid = d.get("entity_id")
+        opening = d.get("valve_opening_entity") or None
+        closing = d.get("valve_closing_entity") or None
+        if eid and opening and closing and d.get("type") == DEVICE_TYPE_TRV:
+            result[eid] = ValveEntities(opening, closing, d.get("valve_closing_mode") == VALVE_IDLE_OPENING)
+    return result
+
+
+def configured_valves(rooms: dict) -> dict[str, ValveEntities]:
+    """``get_valve_entities`` across all rooms."""
+    result: dict[str, ValveEntities] = {}
+    for room in rooms.values():
+        result.update(get_valve_entities(room.get("devices", [])))
+    return result
+
+
+def build_rooms_devices_map(rooms: dict) -> dict[str, list[dict]]:
+    """Return {entity_id: devices[]} map across all rooms.
+
+    Used by managers that need to resolve a device's configuration (e.g.
+    idle_action) by entity_id without carrying the full rooms dict.
+    """
+    return {
+        d["entity_id"]: room.get("devices", [])
+        for room in rooms.values()
+        for d in room.get("devices", [])
+        if d.get("entity_id")
+    }
+
+
+def migrate_heat_pump_devices(devices: list[dict]) -> bool:
+    """Convert any heat_pump devices to ac. Returns True if any were migrated."""
+    migrated = False
+    for d in devices:
+        if d.get("type") == "heat_pump":
+            d["type"] = DEVICE_TYPE_AC
+            migrated = True
+    return migrated
+
+
+def room_contributes_to_group(
+    room_devices: list[dict],
+    member_set: set[str],
+    active_heat_sources: str | None,
+) -> bool:
+    """Whether a room's group members are heating-active per orchestration.
+
+    Used by coordinator._collect_member_room_modes to decide whether a
+    heating room contributes heating demand to a compressor group's
+    master device.
+
+    - ``None``       -> no orchestration data (disabled, missing temp,
+                        no TRV+AC, or popped state). Preserve legacy
+                        behavior: count the room.
+    - ``"none"``     -> orchestration chose nothing (delta_t <= 0) ->
+                        False (all devices idled by orchestrator).
+    - ``"both"``     -> TRV + AC both active -> True.
+    - ``"primary"``  -> only TRVs active -> True iff any group member
+                        in this room is a TRV.
+    - ``"secondary"``-> only ACs active -> True iff any group member
+                        in this room is an AC.
+
+    Unknown string values -> False (fail-safe: master stays idle).
+    """
+    if active_heat_sources is None:
+        return True
+    if active_heat_sources == "none":
+        return False
+    if active_heat_sources == "both":
+        return True
+    if active_heat_sources == "primary":
+        required_type = DEVICE_TYPE_TRV
+    elif active_heat_sources == "secondary":
+        required_type = DEVICE_TYPE_AC
+    else:
+        return False  # defensive: unknown orchestration state
+    for dev in room_devices:
+        eid = dev.get("entity_id", "")
+        if eid and eid in member_set and dev.get("type") == required_type:
+            return True
+    return False
+
+
+def get_coil_dry_config(devices: list[dict], entity_id: str, settings: dict) -> CoilDryConfig:
+    """Resolve the effective coil dry config for one device.
+
+    Device fields override the global settings.  Sentinels: ``coil_dry_minutes=0``
+    and ``coil_dry_mode=""`` mean "inherit"; ``coil_dry_fan_mode=""`` means
+    "inherit" while ``"__keep__"`` means "send no set_fan_mode at all".
+    """
+    dev = get_device_by_eid(devices, entity_id) or {}
+
+    override = dev.get("coil_dry", COIL_DRY_INHERIT)
+    if override == COIL_DRY_ON:
+        enabled = True
+    elif override == COIL_DRY_OFF:
+        enabled = False
+    else:
+        enabled = bool(settings.get("coil_dry_enabled", False))
+
+    dev_fan = dev.get("coil_dry_fan_mode", "")
+    if dev_fan == COIL_DRY_FAN_MODE_KEEP:
+        fan_mode = ""
+    elif dev_fan:
+        fan_mode = dev_fan
+    else:
+        fan_mode = settings.get("coil_dry_fan_mode", DEFAULT_COIL_DRY_FAN_MODE)
+
+    return CoilDryConfig(
+        enabled=enabled,
+        minutes=int(dev.get("coil_dry_minutes") or settings.get("coil_dry_minutes", DEFAULT_COIL_DRY_MINUTES)),
+        mode=dev.get("coil_dry_mode") or settings.get("coil_dry_mode", COIL_DRY_MODE_FAN_ONLY),
+        fan_mode=fan_mode,
+        min_cooling_minutes=int(settings.get("coil_dry_min_cooling_minutes", DEFAULT_COIL_DRY_MIN_COOLING_MINUTES)),
+        drain_minutes=int(settings.get("coil_dry_drain_minutes", DEFAULT_COIL_DRY_DRAIN_MINUTES)),
+    )

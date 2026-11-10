@@ -1,0 +1,609 @@
+/**
+ * rs-settings – Global RoomMind settings page (orchestrator).
+ * Owns all state, loads/saves settings, delegates rendering to sub-components
+ * wrapped in ha-expansion-panel accordion sections.
+ */
+import { LitElement, html, css, nothing } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import type {
+  HomeAssistant,
+  GlobalSettings,
+  RoomConfig,
+  NotificationTarget,
+  CompressorGroup,
+  RoomWithoutArea,
+  TouCalendarBinding,
+  TouCoastRule,
+} from "../types";
+import { localize } from "../utils/localize";
+import { fireSaveStatus } from "../utils/events";
+import { VACATION_SENTINEL } from "../utils/constants";
+import "./settings/rs-settings-panel";
+import "./settings/rs-settings-general";
+import "./settings/rs-settings-sensors";
+import "./settings/rs-settings-control";
+import "./settings/rs-settings-presence";
+import "./settings/rs-settings-tou";
+import "./settings/rs-settings-vacation";
+import "./settings/rs-settings-valve";
+import "./settings/rs-settings-compressor";
+import "./settings/rs-settings-coil-dry";
+import "./settings/rs-settings-mold";
+import "./settings/rs-settings-notifications";
+import "./settings/rs-settings-learning";
+import "./settings/rs-settings-reset";
+import "./settings/rs-settings-orphans";
+
+@customElement("rs-settings")
+export class RsSettings extends LitElement {
+  @property({ attribute: false }) public hass!: HomeAssistant;
+  @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
+  @property({ attribute: false }) public roomsWithoutArea: RoomWithoutArea[] = [];
+  @property({ type: Boolean }) public climateControlActive = true;
+  @state() private _deletedOrphans: ReadonlySet<string> = new Set();
+
+  @state() private _groupByFloor = false;
+  @state() private _climateControlActive = true;
+  @state() private _learningDisabledRooms: string[] = [];
+  @state() private _outdoorTempSensor = "";
+  @state() private _outdoorHumiditySensor = "";
+  @state() private _outdoorCoolingMin = 16;
+  @state() private _outdoorHeatingMax = 22;
+  @state() private _controlMode: "mpc" | "bangbang" = "mpc";
+  @state() private _comfortWeight = 70;
+  @state() private _weatherEntity = "";
+  @state() private _outdoorUnavailableNotify = true;
+  @state() private _predictionEnabled = true;
+  @state() private _vacationActive = false;
+  @state() private _vacationTemp = 15;
+  @state() private _vacationUntil = "";
+  @state() private _presenceEnabled = false;
+  @state() private _presencePersons: string[] = [];
+  @state() private _presenceAwayAction: "eco" | "off" = "eco";
+  @state() private _presenceClearsOverride = false;
+  @state() private _scheduleOffAction: "eco" | "off" = "eco";
+  @state() private _valveProtectionEnabled = false;
+  @state() private _valveProtectionInterval = 7;
+  @state() private _moldDetectionEnabled = false;
+  @state() private _moldHumidityThreshold = 70;
+  @state() private _moldFRsi = 0.8;
+  @state() private _moldSustainedMinutes = 30;
+  @state() private _moldNotificationCooldown = 60;
+  @state() private _moldNotificationsEnabled = true;
+  @state() private _moldNotificationTargets: NotificationTarget[] = [];
+  @state() private _moldPreventionEnabled = false;
+  @state() private _moldPreventionIntensity: "light" | "medium" | "strong" = "medium";
+  @state() private _moldPreventionNotify = false;
+  @state() private _compressorGroups: CompressorGroup[] = [];
+  @state() private _touEnabled = false;
+  @state() private _touTierSource = "auto";
+  @state() private _touLookahead = "auto";
+  @state() private _touRateEntity = "";
+  @state() private _touPeriodEntity = "";
+  @state() private _touNextChangeEntity = "";
+  @state() private _touNextChangeTier = "peak";
+  @state() private _touCalendarEntities: TouCalendarBinding[] = [];
+  @state() private _touFlagEntities: Record<string, string> = {};
+  @state() private _touPriceWeighting = true;
+  @state() private _touThresholds: Record<string, string> = {};
+  @state() private _touPeakHeatFloor = 18;
+  @state() private _touPeakCoolCeiling = 28;
+  @state() private _touMidSetbackDelta = 2;
+  @state() private _touBoostDelta = 2;
+  @state() private _touClampMin = 17;
+  @state() private _touClampMax = 28;
+  @state() private _touCoastMaxMinutes = 480;
+  @state() private _touCoastRules: TouCoastRule[] = [];
+  @state() private _coilDryEnabled = false;
+  @state() private _coilDryMinutes = 20;
+  @state() private _coilDryMode: "fan_only" | "dry" = "fan_only";
+  @state() private _coilDryFanMode = "low";
+  @state() private _coilDryMinCoolingMinutes = 10;
+  @state() private _coilDryDrainMinutes = 0;
+  @state() private _boostAppliedAt: Record<string, number> = {};
+  @state() private _loaded = false;
+
+  private _saveDebounce?: ReturnType<typeof setTimeout>;
+  // switch.roommind_climate_control can change it while this page is open (#291), so it
+  // is only sent after the toggle here was used, never as a stale copy with other settings.
+  private _climateControlDirty = false;
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._loadSettings();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._saveDebounce) clearTimeout(this._saveDebounce);
+  }
+
+  private async _loadSettings() {
+    try {
+      const result = await this.hass.callWS<{ settings: GlobalSettings }>({
+        type: "roommind/settings/get",
+      });
+      const s = result.settings;
+      this._groupByFloor = s.group_by_floor ?? false;
+      this._climateControlActive = s.climate_control_active ?? true;
+      this._learningDisabledRooms = s.learning_disabled_rooms ?? [];
+      this._outdoorTempSensor = s.outdoor_temp_sensor ?? "";
+      this._outdoorHumiditySensor = s.outdoor_humidity_sensor ?? "";
+      this._outdoorCoolingMin = s.outdoor_cooling_min ?? 16;
+      this._outdoorHeatingMax = s.outdoor_heating_max ?? 22;
+      this._controlMode = s.control_mode ?? "mpc";
+      this._comfortWeight = s.comfort_weight ?? 70;
+      this._weatherEntity = s.weather_entity ?? "";
+      this._outdoorUnavailableNotify = s.outdoor_unavailable_notify ?? true;
+      this._predictionEnabled = s.prediction_enabled ?? true;
+      const vUntil = s.vacation_until;
+      this._vacationActive = !!(vUntil && vUntil > Date.now() / 1000);
+      this._vacationTemp = s.vacation_temp ?? 15;
+      if (vUntil && vUntil > Date.now() / 1000 && vUntil < VACATION_SENTINEL) {
+        this._vacationUntil = this._tsToDatetimeLocal(vUntil);
+      } else {
+        this._vacationUntil = "";
+      }
+      this._presenceEnabled = s.presence_enabled ?? false;
+      this._presencePersons = s.presence_persons ?? [];
+      this._presenceAwayAction = s.presence_away_action ?? "eco";
+      this._presenceClearsOverride = s.presence_clears_override ?? false;
+      this._scheduleOffAction = s.schedule_off_action ?? "eco";
+      this._valveProtectionEnabled = s.valve_protection_enabled ?? false;
+      this._valveProtectionInterval = s.valve_protection_interval_days ?? 7;
+      this._moldDetectionEnabled = s.mold_detection_enabled ?? false;
+      this._moldHumidityThreshold = s.mold_humidity_threshold ?? 70;
+      this._moldFRsi = s.mold_f_rsi ?? 0.8;
+      this._moldSustainedMinutes = s.mold_sustained_minutes ?? 30;
+      this._moldNotificationCooldown = s.mold_notification_cooldown ?? 60;
+      this._moldNotificationsEnabled = s.mold_notifications_enabled ?? true;
+      this._moldNotificationTargets = s.mold_notification_targets ?? [];
+      this._moldPreventionEnabled = s.mold_prevention_enabled ?? false;
+      this._moldPreventionIntensity = s.mold_prevention_intensity ?? "medium";
+      this._moldPreventionNotify = s.mold_prevention_notify_enabled ?? false;
+      this._compressorGroups = s.compressor_groups ?? [];
+      this._touEnabled = s.tou_enabled ?? false;
+      this._touTierSource = s.tou_tier_source ?? "auto";
+      this._touLookahead = s.tou_lookahead ?? "auto";
+      this._touRateEntity = s.tou_rate_entity ?? "";
+      this._touPeriodEntity = s.tou_period_entity ?? "";
+      this._touNextChangeEntity = s.tou_next_change_entity ?? "";
+      this._touNextChangeTier = s.tou_next_change_tier ?? "peak";
+      this._touCalendarEntities = s.tou_calendar_entities ?? [];
+      this._touFlagEntities = s.tou_flag_entities ?? {};
+      this._touPriceWeighting = s.tou_price_weighting ?? true;
+      this._touThresholds = {
+        tou_peak_threshold: s.tou_peak_threshold != null ? String(s.tou_peak_threshold) : "",
+        tou_mid_threshold: s.tou_mid_threshold != null ? String(s.tou_mid_threshold) : "",
+        tou_ultra_threshold: s.tou_ultra_threshold != null ? String(s.tou_ultra_threshold) : "",
+      };
+      this._touPeakHeatFloor = s.tou_peak_heat_floor ?? 18;
+      this._touPeakCoolCeiling = s.tou_peak_cool_ceiling ?? 28;
+      this._touMidSetbackDelta = s.tou_mid_setback_delta ?? 2;
+      this._touBoostDelta = s.tou_boost_delta ?? 2;
+      this._touClampMin = s.tou_clamp_min ?? 17;
+      this._touClampMax = s.tou_clamp_max ?? 28;
+      this._touCoastMaxMinutes = s.tou_coast_max_minutes ?? 480;
+      this._touCoastRules = s.tou_coast_rules ?? [];
+      this._coilDryEnabled = s.coil_dry_enabled ?? false;
+      this._coilDryMinutes = s.coil_dry_minutes ?? 20;
+      this._coilDryMode = s.coil_dry_mode ?? "fan_only";
+      this._coilDryFanMode = s.coil_dry_fan_mode ?? "low";
+      this._coilDryMinCoolingMinutes = s.coil_dry_min_cooling_minutes ?? 10;
+      this._coilDryDrainMinutes = s.coil_dry_drain_minutes ?? 0;
+      this._boostAppliedAt = s.boost_applied_at ?? {};
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.debug("[RoomMind] loadSettings:", err);
+    } finally {
+      this._loaded = true;
+    }
+  }
+
+  protected willUpdate(changed: Map<string, unknown>) {
+    if (changed.has("roomsWithoutArea") && this._deletedOrphans.size) {
+      // The list from the backend is current again; an id resting later must show up again
+      const listed = new Set(this.roomsWithoutArea.map((r) => r.area_id));
+      this._deletedOrphans = new Set([...this._deletedOrphans].filter((id) => listed.has(id)));
+    }
+    if (
+      changed.has("climateControlActive") &&
+      changed.get("climateControlActive") !== undefined &&
+      !this._climateControlDirty
+    ) {
+      this._climateControlActive = this.climateControlActive;
+    }
+  }
+
+  protected render() {
+    if (!this._loaded) {
+      return html`<div class="loading">${localize("panel.loading", this.hass.language)}</div>`;
+    }
+
+    const l = this.hass.language;
+    const orphans = this.roomsWithoutArea.filter((r) => !this._deletedOrphans.has(r.area_id));
+
+    return html`
+      ${
+        orphans.length
+          ? html`<rs-settings-panel
+              icon="mdi:home-remove-outline"
+              .heading=${localize("settings.orphans_title", l)}
+              .intro=${localize("settings.intro.orphans", l)}
+            >
+              <rs-settings-orphans
+                .hass=${this.hass}
+                .rooms=${orphans}
+                @orphan-deleted=${(e: CustomEvent<string>) => {
+                  this._deletedOrphans = new Set([...this._deletedOrphans, e.detail]);
+                }}
+              ></rs-settings-orphans>
+            </rs-settings-panel>`
+          : nothing
+      }
+      <rs-settings-panel
+        icon="mdi:power"
+        .heading=${localize("settings.general_title", l)}
+        .intro=${localize("settings.intro.general", l)}
+      >
+        <rs-settings-general
+          .hass=${this.hass}
+          .groupByFloor=${this._groupByFloor}
+          .climateControlActive=${this._climateControlActive}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-general>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:thermometer"
+        .heading=${localize("settings.sensors_title", l)}
+        .intro=${localize("settings.intro.sensors", l)}
+      >
+        <rs-settings-sensors
+          .hass=${this.hass}
+          .outdoorTempSensor=${this._outdoorTempSensor}
+          .outdoorHumiditySensor=${this._outdoorHumiditySensor}
+          .weatherEntity=${this._weatherEntity}
+          .outdoorUnavailableNotify=${this._outdoorUnavailableNotify}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-sensors>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:tune-variant"
+        .heading=${localize("settings.control_title", l)}
+        .intro=${localize("settings.intro.control", l)}
+      >
+        <rs-settings-control
+          .hass=${this.hass}
+          .controlMode=${this._controlMode}
+          .comfortWeight=${this._comfortWeight}
+          .outdoorCoolingMin=${this._outdoorCoolingMin}
+          .outdoorHeatingMax=${this._outdoorHeatingMax}
+          .predictionEnabled=${this._predictionEnabled}
+          .scheduleOffAction=${this._scheduleOffAction}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-control>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:home-account"
+        .heading=${localize("presence.title", l)}
+        .intro=${localize("settings.intro.presence", l)}
+      >
+        <rs-settings-presence
+          .hass=${this.hass}
+          .presenceEnabled=${this._presenceEnabled}
+          .presencePersons=${this._presencePersons}
+          .presenceAwayAction=${this._presenceAwayAction}
+          .presenceClearsOverride=${this._presenceClearsOverride}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-presence>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:airplane"
+        .heading=${localize("vacation.title", l)}
+        .intro=${localize("settings.intro.vacation", l)}
+      >
+        <rs-settings-vacation
+          .hass=${this.hass}
+          .vacationActive=${this._vacationActive}
+          .vacationTemp=${this._vacationTemp}
+          .vacationUntil=${this._vacationUntil}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-vacation>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:shield-refresh"
+        .heading=${localize("valve_protection.title", l)}
+        .intro=${localize("settings.intro.valve", l)}
+      >
+        <rs-settings-valve
+          .hass=${this.hass}
+          .valveProtectionEnabled=${this._valveProtectionEnabled}
+          .valveProtectionInterval=${this._valveProtectionInterval}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-valve>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:heat-pump-outline"
+        .heading=${localize("compressor.title", l)}
+        .intro=${localize("settings.intro.compressor", l)}
+      >
+        <rs-settings-compressor
+          .hass=${this.hass}
+          .compressorGroups=${this._compressorGroups}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-compressor>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:lightning-bolt"
+        .heading=${localize("tou.title", l)}
+        .intro=${localize("settings.intro.tou", l)}
+      >
+        <rs-settings-tou
+          .hass=${this.hass}
+          .touEnabled=${this._touEnabled}
+          .touTierSource=${this._touTierSource}
+          .touLookahead=${this._touLookahead}
+          .touRateEntity=${this._touRateEntity}
+          .touPeriodEntity=${this._touPeriodEntity}
+          .touNextChangeEntity=${this._touNextChangeEntity}
+          .touNextChangeTier=${this._touNextChangeTier}
+          .touCalendarEntities=${this._touCalendarEntities}
+          .touFlagEntities=${this._touFlagEntities}
+          .touPriceWeighting=${this._touPriceWeighting}
+          .touThresholds=${this._touThresholds}
+          .touPeakHeatFloor=${this._touPeakHeatFloor}
+          .touPeakCoolCeiling=${this._touPeakCoolCeiling}
+          .touMidSetbackDelta=${this._touMidSetbackDelta}
+          .touBoostDelta=${this._touBoostDelta}
+          .touClampMin=${this._touClampMin}
+          .touClampMax=${this._touClampMax}
+          .touCoastMaxMinutes=${this._touCoastMaxMinutes}
+          .touCoastRules=${this._touCoastRules}
+          .roomAreas=${Object.fromEntries(
+            Object.entries(this.rooms).map(([id, r]) => [id, r.display_name || id]),
+          )}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-tou>
+      </rs-settings-panel>
+
+      <rs-settings-panel .heading=${localize("coil_dry.title", l)} icon="mdi:air-filter">
+        <rs-settings-coil-dry
+          .hass=${this.hass}
+          .coilDryEnabled=${this._coilDryEnabled}
+          .coilDryMinutes=${this._coilDryMinutes}
+          .coilDryMode=${this._coilDryMode}
+          .coilDryFanMode=${this._coilDryFanMode}
+          .coilDryMinCoolingMinutes=${this._coilDryMinCoolingMinutes}
+          .coilDryDrainMinutes=${this._coilDryDrainMinutes}
+          .availableFanModes=${this._availableAcFanModes()}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-coil-dry>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:water-alert"
+        .heading=${localize("mold.title", l)}
+        .intro=${localize("settings.intro.mold", l)}
+      >
+        <rs-settings-mold
+          .hass=${this.hass}
+          .moldDetectionEnabled=${this._moldDetectionEnabled}
+          .moldHumidityThreshold=${this._moldHumidityThreshold}
+          .moldFRsi=${this._moldFRsi}
+          .moldSustainedMinutes=${this._moldSustainedMinutes}
+          .moldPreventionEnabled=${this._moldPreventionEnabled}
+          .moldPreventionIntensity=${this._moldPreventionIntensity}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-mold>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:bell-outline"
+        .heading=${localize("notifications.title", l)}
+        .intro=${localize("settings.intro.notifications", l)}
+        .badge=${localize("badge.beta", l)}
+        .badgeHint=${localize("badge.beta_hint", l)}
+      >
+        <rs-settings-notifications
+          .hass=${this.hass}
+          .notificationsEnabled=${this._moldNotificationsEnabled}
+          .notificationTargets=${this._moldNotificationTargets}
+          .notificationCooldown=${this._moldNotificationCooldown}
+          .moldPreventionEnabled=${this._moldPreventionEnabled}
+          .moldPreventionNotify=${this._moldPreventionNotify}
+          @setting-changed=${this._onSettingChanged}
+        ></rs-settings-notifications>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:brain"
+        .heading=${localize("settings.learning_title", l)}
+        .intro=${localize("settings.intro.learning", l)}
+      >
+        <rs-settings-learning
+          .hass=${this.hass}
+          .rooms=${this.rooms}
+          .learningDisabledRooms=${this._learningDisabledRooms}
+          .boostAppliedAt=${this._boostAppliedAt}
+          .roomsLive=${Object.fromEntries(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- HA room data includes untyped live state
+            Object.entries(this.rooms).map(([id, r]) => [id, (r as any).live ?? {}]),
+          )}
+          @setting-changed=${this._onSettingChanged}
+          @boost-applied=${this._onBoostApplied}
+        ></rs-settings-learning>
+      </rs-settings-panel>
+
+      <rs-settings-panel
+        icon="mdi:restart"
+        .heading=${localize("settings.reset_title", l)}
+        .intro=${localize("settings.intro.reset", l)}
+      >
+        <rs-settings-reset .hass=${this.hass} .rooms=${this.rooms}></rs-settings-reset>
+      </rs-settings-panel>
+    `;
+  }
+
+  private _onBoostApplied(e: CustomEvent<{ area_id: string; n_observations: number }>) {
+    const { area_id, n_observations } = e.detail;
+    this._boostAppliedAt = { ...this._boostAppliedAt, [area_id]: n_observations };
+  }
+
+  private _onSettingChanged(e: CustomEvent<{ key: string; value: unknown }>) {
+    const { key, value } = e.detail;
+    if (key === "climateControlActive") this._climateControlDirty = true;
+    (this as Record<string, unknown>)[`_${key}`] = value;
+    this._autoSave();
+  }
+
+  /**
+   * Union of fan_modes across every configured AC entity.
+   *
+   * The global setting has no single device to read fan_modes from, so show
+   * the speeds the user's actual hardware reports instead of a guessed list.
+   */
+  private _availableAcFanModes(): string[] {
+    const modes = new Set<string>();
+    for (const room of Object.values(this.rooms ?? {})) {
+      for (const dev of room.devices ?? []) {
+        if (dev.type !== "ac") continue;
+        const st = this.hass?.states?.[dev.entity_id];
+        for (const fm of (st?.attributes?.fan_modes ?? []) as string[]) modes.add(fm);
+      }
+    }
+    return [...modes].sort();
+  }
+
+  private _numOrNull(raw: string | undefined): number | null {
+    if (raw === undefined || raw === "") return null;
+    const v = parseFloat(raw);
+    return isNaN(v) ? null : v;
+  }
+
+  private _tsToDatetimeLocal(ts: number): string {
+    const d = new Date(ts * 1000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  private _autoSave() {
+    if (this._saveDebounce) clearTimeout(this._saveDebounce);
+    this._saveDebounce = setTimeout(() => this._doSave(), 500);
+  }
+
+  private async _doSave() {
+    fireSaveStatus(this, "saving");
+    const sentClimateControl = this._climateControlDirty ? this._climateControlActive : undefined;
+
+    try {
+      await this.hass.callWS({
+        type: "roommind/settings/save",
+        group_by_floor: this._groupByFloor,
+        ...(sentClimateControl !== undefined ? { climate_control_active: sentClimateControl } : {}),
+        learning_disabled_rooms: this._learningDisabledRooms,
+        outdoor_temp_sensor: this._outdoorTempSensor,
+        outdoor_humidity_sensor: this._outdoorHumiditySensor,
+        outdoor_cooling_min: this._outdoorCoolingMin,
+        outdoor_heating_max: this._outdoorHeatingMax,
+        control_mode: this._controlMode,
+        comfort_weight: this._comfortWeight,
+        weather_entity: this._weatherEntity,
+        outdoor_unavailable_notify: this._outdoorUnavailableNotify,
+        prediction_enabled: this._predictionEnabled,
+        vacation_temp: this._vacationTemp,
+        vacation_until: this._vacationActive
+          ? this._vacationUntil
+            ? new Date(this._vacationUntil).getTime() / 1000
+            : VACATION_SENTINEL
+          : null,
+        presence_enabled: this._presenceEnabled,
+        presence_persons: this._presencePersons.filter((p) => p),
+        presence_away_action: this._presenceAwayAction,
+        presence_clears_override: this._presenceClearsOverride,
+        schedule_off_action: this._scheduleOffAction,
+        valve_protection_enabled: this._valveProtectionEnabled,
+        valve_protection_interval_days: this._valveProtectionInterval,
+        compressor_groups: this._compressorGroups.filter((g) => g.members.length > 0),
+        coil_dry_enabled: this._coilDryEnabled,
+        coil_dry_minutes: this._coilDryMinutes,
+        coil_dry_mode: this._coilDryMode,
+        coil_dry_fan_mode: this._coilDryFanMode,
+        coil_dry_min_cooling_minutes: this._coilDryMinCoolingMinutes,
+        coil_dry_drain_minutes: this._coilDryDrainMinutes,
+        mold_detection_enabled: this._moldDetectionEnabled,
+        mold_humidity_threshold: this._moldHumidityThreshold,
+        mold_f_rsi: this._moldFRsi,
+        mold_sustained_minutes: this._moldSustainedMinutes,
+        mold_notification_cooldown: this._moldNotificationCooldown,
+        mold_notifications_enabled: this._moldNotificationsEnabled,
+        mold_notification_targets: this._moldNotificationTargets.filter((t) => t.entity_id),
+        mold_prevention_enabled: this._moldPreventionEnabled,
+        mold_prevention_intensity: this._moldPreventionIntensity,
+        mold_prevention_notify_enabled: this._moldPreventionNotify,
+        mold_prevention_notify_targets: this._moldPreventionNotify
+          ? this._moldNotificationTargets.filter((t) => t.entity_id)
+          : [],
+        tou_enabled: this._touEnabled,
+        tou_tier_source: this._touTierSource,
+        tou_lookahead: this._touLookahead,
+        tou_rate_entity: this._touRateEntity,
+        tou_period_entity: this._touPeriodEntity,
+        tou_next_change_entity: this._touNextChangeEntity,
+        tou_next_change_tier: this._touNextChangeTier,
+        tou_calendar_entities: this._touCalendarEntities.filter((c) => c.entity_id),
+        tou_flag_entities: Object.fromEntries(
+          Object.entries(this._touFlagEntities).filter(([, v]) => v),
+        ),
+        tou_price_weighting: this._touPriceWeighting,
+        tou_peak_threshold: this._numOrNull(this._touThresholds["tou_peak_threshold"]),
+        tou_mid_threshold: this._numOrNull(this._touThresholds["tou_mid_threshold"]),
+        tou_ultra_threshold: this._numOrNull(this._touThresholds["tou_ultra_threshold"]),
+        tou_peak_heat_floor: this._touPeakHeatFloor,
+        tou_peak_cool_ceiling: this._touPeakCoolCeiling,
+        tou_mid_setback_delta: this._touMidSetbackDelta,
+        tou_boost_delta: this._touBoostDelta,
+        tou_clamp_min: this._touClampMin,
+        tou_clamp_max: this._touClampMax,
+        tou_coast_max_minutes: this._touCoastMaxMinutes,
+        tou_coast_rules: this._touCoastRules.filter((r) => r.rooms.length > 0),
+      });
+      // Toggled again while the request was out: stays dirty, the queued save sends it.
+      if (this._climateControlActive === sentClimateControl) this._climateControlDirty = false;
+      fireSaveStatus(this, "saved");
+    } catch {
+      if (this._climateControlActive === sentClimateControl) {
+        this._climateControlDirty = false;
+        this._climateControlActive = this.climateControlActive;
+      }
+      fireSaveStatus(this, "error");
+    }
+  }
+
+  static styles = css`
+    :host {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 0 16px;
+    }
+
+    .loading {
+      padding: 80px 16px;
+      text-align: center;
+      color: var(--secondary-text-color);
+    }
+  `;
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    "rs-settings": RsSettings;
+  }
+}

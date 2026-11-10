@@ -1,0 +1,14 @@
+# Dev dependencies for RoomMind
+# Install: pip install -r requirements-dev.txt
+
+# Testing — pytest-homeassistant-custom-component pins exact versions
+# of many sub-dependencies, so avoid version constraints that conflict.
+pytest-homeassistant-custom-component
+pytest-cov
+pytest-freezer
+pytest-sugar
+pytest-xdist
+
+# Linting & type checking
+ruff
+mypy
