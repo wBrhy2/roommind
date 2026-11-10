@@ -113,6 +113,22 @@ export class RsSettingsTou extends LitElement {
       .tier-grid ha-select {
         width: 100%;
       }
+      .shaping-grid {
+        margin-top: 8px;
+      }
+      .col-header {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--secondary-text-color);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      .col-span {
+        grid-column: 1 / -1;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        margin-top: 6px;
+      }
       .section-label {
         font-size: 14px;
         font-weight: 500;
@@ -254,6 +270,9 @@ export class RsSettingsTou extends LitElement {
       @media (max-width: 500px) {
         .tier-grid {
           grid-template-columns: 1fr;
+        }
+        .shaping-grid .col-header {
+          display: none;
         }
       }
     `,
@@ -500,14 +519,10 @@ export class RsSettingsTou extends LitElement {
                   ? html`
                       <div class="section-label">${localize("tou.shaping", l)}</div>
                       <div class="hint">${localize("tou.shaping_hint", l)}</div>
-                      <div class="tier-grid">
-                        ${this._tempField(
-                          "touPeakHeatFloor",
-                          localize("tou.peak_heat_floor", l),
-                          this.touPeakHeatFloor,
-                          5,
-                          35,
-                        )}
+                      <div class="tier-grid shaping-grid">
+                        <div class="col-header">${localize("tou.col_heating", l)}</div>
+                        <div class="col-header">${localize("tou.col_cooling", l)}</div>
+                        ${this._tempField("touPeakHeatFloor", localize("tou.peak_heat_floor", l), this.touPeakHeatFloor, 5, 35)}
                         ${this._tempField(
                           "touPeakCoolCeiling",
                           localize("tou.peak_cool_ceiling", l),
@@ -515,13 +530,8 @@ export class RsSettingsTou extends LitElement {
                           5,
                           40,
                         )}
-                        ${this._deltaField(
-                          "touMidSetbackDelta",
-                          localize("tou.mid_delta", l),
-                          this.touMidSetbackDelta,
-                          0,
-                          5,
-                        )}
+                        <div class="col-span">${localize("tou.both_steps", l)}</div>
+                        ${this._deltaField("touMidSetbackDelta", localize("tou.mid_delta", l), this.touMidSetbackDelta, 0, 5)}
                         ${this._deltaField("touBoostDelta", localize("tou.boost_delta", l), this.touBoostDelta, 0, 5)}
                         ${this._tempField("touClampMin", localize("tou.clamp_min", l), this.touClampMin, 5, 30)}
                         ${this._tempField("touClampMax", localize("tou.clamp_max", l), this.touClampMax, 10, 40)}
