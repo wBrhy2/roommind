@@ -225,7 +225,10 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
                     "name": "roommind-panel",
                     "embed_iframe": False,
                     "trust_external": False,
-                    "js_url": "/roommind/roommind-panel.js",
+                    # Version query busts heuristic browser caching of the
+                    # bundle: every release re-registers a fresh URL, so
+                    # upgrades take effect without hard-refreshes.
+                    "js_url": f"/roommind/roommind-panel.js?v={VERSION}",
                 }
             },
         )
