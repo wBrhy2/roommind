@@ -133,7 +133,11 @@ export interface TouCoastRule {
   enabled: boolean;
   rooms: string[];
   trigger: { from_tier: string; to_tier: string };
-  coast_temp: number;
+  /** Coast target per mode; blank/undefined = rule skipped in that mode.
+   * Legacy rules carry only coast_temp, which seeds both sides. */
+  coast_temp?: number | null;
+  coast_heat_temp?: number | null;
+  coast_cool_temp?: number | null;
   end: TouCoastEnd;
   post_hold: TouPostHold;
 }

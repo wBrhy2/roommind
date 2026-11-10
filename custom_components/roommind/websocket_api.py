@@ -904,7 +904,9 @@ async def websocket_get_settings(
                     vol.Optional("from_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
                     vol.Optional("to_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
                 },
-                vol.Required("coast_temp"): vol.All(vol.Coerce(float), vol.Range(min=5, max=35)),
+                vol.Optional("coast_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
+                vol.Optional("coast_heat_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
+                vol.Optional("coast_cool_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
                 vol.Required("end"): {
                     vol.Required("mode"): vol.In(TOU_END_MODES),
                     vol.Required("value"): vol.Any(vol.Coerce(int), str),
@@ -1008,6 +1010,13 @@ async def websocket_save_settings(
             connection.send_error(msg["id"], "duplicate_tou_rule_id", "Coast rule IDs must be unique")
             return
         for r in rules:
+            if r.get("coast_temp") is None and r.get("coast_heat_temp") is None and r.get("coast_cool_temp") is None:
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_coast_temp",
+                    "Coast rules need a heating or a cooling temperature — or disable the rule",
+                )
+                return
             end = r.get("end", {})
             mode, value = end.get("mode"), end.get("value")
             if mode == "duration" and not (

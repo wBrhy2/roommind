@@ -158,14 +158,20 @@ Turn it off if you only want the plain tier setback/boost.
 
 A coast rule turns a tier *change* into a scheduled temperature event, the
 same way your own automations did: when the tariff flips (say ultra-low to
-peak), the room stops conditioning and drifts to the **coast temperature**,
-holding it for as long as the rule says, then either returns to the schedule
-or keeps holding.
+peak), the room stops conditioning and drifts to its **coast temperatures** —
+one for the heating side, one for the cooling side — holding them for as long
+as the rule says, then either returns to the schedule or keeps holding.
 
 For every matching change in the timeline the rule computes a window:
 
 - **Trigger**: which change starts it (`from tier → to tier`, either side may
   stay "Any tier"), across the rooms you tick.
+- **Coast temperatures**: a heating and a cooling target, each optional. A
+  blank side means the rule is skipped in that mode — a heating-only rule
+  leaves cooling entirely alone (plain tier shaping still applies there).
+  A set value is a limit held for the whole window, never a point the room
+  is forced to: heating drifts *down to but not below* it, cooling *up to
+  but not above* it.
 - **Coast ends after**: a fixed duration (change + X minutes), at a wall-clock
   time (e.g. `07:30` — the departure time the comfort must last until), at
   the next change into a chosen tier (the cheap window that ends the peak;
@@ -209,5 +215,6 @@ tier timeline; the panel shows the active tier.
    clamp 17–28 °C, price weighting on.
 4. Rooms: `Setback + boost` for the loft/boys/dining rooms that should
    pre-charge overnight; `Setback only` where comfort during peaks matters.
-5. Coast rule "Evening peak push-out": trigger off→peak, coast 18 °C, end
-   `tier_window → off` (cap 480 min), post-hold `Return to schedule`.
+5. Coast rule "Evening peak push-out": trigger off→peak, heating coast
+   18 °C (cooling blank), end `tier_window → off` (cap 480 min), post-hold
+   `Return to schedule`.

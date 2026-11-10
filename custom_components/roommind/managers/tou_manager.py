@@ -548,35 +548,35 @@ class TouManager:
                     return targets  # a manual override is never shaved
             vacation_now = vacation_until is not None and ts < float(vacation_until) and vacation_temp is not None
             # A coast window is a synthesized schedule block: inside it the rule's
-            # temperature REPLACES tier shaping (never raising demand, though).
-            coast: float | None = None
-            for w_start, w_end, w_coast in windows:
+            # temperature REPLACES tier shaping on its side (never raising demand);
+            # a side the rule left blank keeps plain tier shaping.
+            coast_heat: float | None = None
+            coast_cool: float | None = None
+            for w_start, w_end, w_heat, w_cool in windows:
                 if w_start <= ts < w_end:
-                    coast = w_coast
+                    coast_heat, coast_cool = w_heat, w_cool
                     break
-            if coast is None:
-                tier = timeline.tier_at(ts)
+            tier = timeline.tier_at(ts)
+            if coast_heat is not None:
+                if heat is not None and coast_heat < heat and not mold_active:
+                    heat = coast_heat
+            elif heat is not None:
+                if tier == TOU_TIER_PEAK and not mold_active:
+                    heat = min(heat, peak_floor)
+                elif tier == TOU_TIER_MID and not mold_active:
+                    heat = max(heat - mid_delta, min(heat, clamp_min))
+                elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
+                    heat = max(min(heat + boost_delta, boost_cap), heat)
+            if coast_cool is not None:
+                if cool is not None and coast_cool > cool:
+                    cool = coast_cool
+            elif cool is not None:
                 if tier == TOU_TIER_PEAK:
-                    if heat is not None and not mold_active:
-                        heat = min(heat, peak_floor)
-                    if cool is not None:
-                        cool = max(cool, peak_ceiling)
+                    cool = max(cool, peak_ceiling)
                 elif tier == TOU_TIER_MID:
-                    if heat is not None and not mold_active:
-                        heat = max(heat - mid_delta, min(heat, clamp_min))
-                    if cool is not None:
-                        cool = min(cool + mid_delta, max(cool, clamp_max))
-                elif tier == TOU_TIER_ULTRA_LOW:
-                    if boost_allowed and not vacation_now and occupied:
-                        if heat is not None:
-                            heat = max(min(heat + boost_delta, boost_cap), heat)
-                        if cool is not None:
-                            cool = min(max(cool - boost_delta, min(cool, clamp_min)), cool)
-            else:
-                if heat is not None and coast < heat and not mold_active:
-                    heat = coast
-                elif cool is not None and coast > cool:
-                    cool = coast
+                    cool = min(cool + mid_delta, max(cool, clamp_max))
+                elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
+                    cool = min(max(cool - boost_delta, min(cool, clamp_min)), cool)
             return TargetTemps(heat=heat, cool=cool)
 
         return adjust
@@ -591,18 +591,26 @@ class TouManager:
         area_id: str,
         settings: dict[str, Any],
         timeline: TouTimeline,
-    ) -> list[tuple[float, float, float]]:
-        """Materialize [start, end, coast_temp] windows for one room from its rules."""
+    ) -> list[tuple[float, float, float | None, float | None]]:
+        """Materialize [start, end, coast_heat, coast_cool] windows for one room.
+
+        A blank coast temperature skips that mode (tier shaping still applies
+        there); a rule blank on both sides produces no window. Legacy rules
+        carry a single ``coast_temp``, which stands in for both sides — the
+        drift guards made it a no-op in the irrelevant direction anyway.
+        """
         rules = settings.get("tou_coast_rules") or []
-        windows: list[tuple[float, float, float]] = []
+        windows: list[tuple[float, float, float | None, float | None]] = []
         horizon_end = timeline.segments[-1].end if timeline.segments else time.time()
         for rule in rules:
             if not isinstance(rule, dict) or not rule.get("enabled", True):
                 continue
             if area_id not in (rule.get("rooms") or []):
                 continue
-            coast = rule.get("coast_temp")
-            if not isinstance(coast, (int, float)):
+            legacy = rule.get("coast_temp")
+            coast_heat = self._coast_value(rule.get("coast_heat_temp", legacy))
+            coast_cool = self._coast_value(rule.get("coast_cool_temp", legacy))
+            if coast_heat is None and coast_cool is None:
                 continue
             trigger = rule.get("trigger") or {}
             from_tier = str(trigger.get("from_tier", ""))
@@ -621,10 +629,16 @@ class TouManager:
                 if post_hold == "stay":
                     nxt = timeline.next_boundary_after(end)
                     end = nxt if nxt is not None else horizon_end
-                windows.append((b_ts, min(end, horizon_end), float(coast)))
+                windows.append((b_ts, min(end, horizon_end), coast_heat, coast_cool))
                 break  # one window per rule: the first matching boundary in the horizon
         windows.sort(key=lambda w: w[0])
         return windows
+
+    @staticmethod
+    def _coast_value(raw: Any) -> float | None:
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        return float(raw)
 
     def _window_end(
         self,

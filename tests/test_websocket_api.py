@@ -3495,6 +3495,62 @@ async def test_save_settings_tou_rate_windows_invalid(ws_hass, store, connection
 
 
 @pytest.mark.asyncio
+async def test_save_settings_tou_coast_side_temps(ws_hass, store, connection):
+    """Coast rules persist per-side temperatures; a blank side stores as null."""
+    await store.async_load()
+
+    msg = {
+        "id": 68,
+        "type": "roommind/settings/save",
+        "tou_coast_rules": [
+            {
+                "id": "cool-only",
+                "name": "Relax cooling only",
+                "rooms": ["living_room"],
+                "trigger": {"from_tier": "off", "to_tier": "peak"},
+                "coast_heat_temp": None,
+                "coast_cool_temp": 26.0,
+                "end": {"mode": "duration", "value": 120},
+                "post_hold": "schedule",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    rule = connection.send_result.call_args[0][1]["settings"]["tou_coast_rules"][0]
+    assert rule["coast_heat_temp"] is None
+    assert rule["coast_cool_temp"] == 26.0
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_coast_needs_one_side(ws_hass, store, connection):
+    """A rule blank on both sides is rejected — disabling is what the toggle is for."""
+    await store.async_load()
+
+    msg = {
+        "id": 69,
+        "type": "roommind/settings/save",
+        "tou_coast_rules": [
+            {
+                "id": "empty",
+                "name": "empty",
+                "rooms": ["living_room"],
+                "trigger": {"from_tier": "", "to_tier": "peak"},
+                "coast_heat_temp": None,
+                "coast_cool_temp": None,
+                "end": {"mode": "duration", "value": 120},
+                "post_hold": "schedule",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    assert connection.send_result.call_count == 0
+    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_temp"
+
+
+@pytest.mark.asyncio
 async def test_save_room_tou_fields(ws_hass, store, connection):
     """Per-room Time-of-Use fields persist on the room."""
     await store.async_load()

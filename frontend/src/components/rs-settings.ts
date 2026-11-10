@@ -189,7 +189,13 @@ export class RsSettings extends LitElement {
       this._touClampMin = s.tou_clamp_min ?? 17;
       this._touClampMax = s.tou_clamp_max ?? 28;
       this._touCoastMaxMinutes = s.tou_coast_max_minutes ?? 480;
-      this._touCoastRules = s.tou_coast_rules ?? [];
+      this._touCoastRules = (s.tou_coast_rules ?? []).map((r) => ({
+        ...r,
+        coast_heat_temp:
+          "coast_heat_temp" in r ? (r.coast_heat_temp ?? null) : (r.coast_temp ?? null),
+        coast_cool_temp:
+          "coast_cool_temp" in r ? (r.coast_cool_temp ?? null) : (r.coast_temp ?? null),
+      }));
       this._coilDryEnabled = s.coil_dry_enabled ?? false;
       this._coilDryMinutes = s.coil_dry_minutes ?? 20;
       this._coilDryMode = s.coil_dry_mode ?? "fan_only";

@@ -781,34 +781,58 @@ export class RsSettingsTou extends LitElement {
           )}
         </div>
 
-        <div class="tier-grid">
+        <div class="tier-grid shaping-grid">
+          <div class="col-header">${localize("tou.col_heating", l)}</div>
+          <div class="col-header">${localize("tou.col_cooling", l)}</div>
           <ha-textfield
             type="number"
-            .value=${String(toDisplay(rule.coast_temp, this.hass))}
+            .value=${rule.coast_heat_temp == null ? "" : String(toDisplay(rule.coast_heat_temp, this.hass))}
             .label=${localize("tou.rule_coast_temp", l)}
             .suffix=${tempUnit(this.hass)}
             min=${range.min}
             max=${range.max}
             step=${tempStep(this.hass)}
             @change=${(e: Event) => {
-              const v = parseFloat((e.target as HTMLInputElement).value);
-              if (!isNaN(v)) update({ coast_temp: toCelsius(v, this.hass) });
+              const raw = (e.target as HTMLInputElement).value.trim();
+              if (raw === "") update({ coast_heat_temp: null });
+              else {
+                const v = parseFloat(raw);
+                if (!isNaN(v)) update({ coast_heat_temp: toCelsius(v, this.hass) });
+              }
             }}
           ></ha-textfield>
-          <ha-select
-            .label=${localize("tou.rule_end_mode", l)}
-            .value=${rule.end.mode}
-            .options=${END_MODES.map((m) => ({ value: m, label: localize(`tou.end.${m}`, l) }))}
-            @selected=${(e: Event) => {
-              const v = getSelectValue(e);
-              if (v !== null)
-                update({ end: { mode: v as (typeof END_MODES)[number], value: rule.end.value } });
+          <ha-textfield
+            type="number"
+            .value=${rule.coast_cool_temp == null ? "" : String(toDisplay(rule.coast_cool_temp, this.hass))}
+            .label=${localize("tou.rule_coast_temp", l)}
+            .suffix=${tempUnit(this.hass)}
+            min=${range.min}
+            max=${range.max}
+            step=${tempStep(this.hass)}
+            @change=${(e: Event) => {
+              const raw = (e.target as HTMLInputElement).value.trim();
+              if (raw === "") update({ coast_cool_temp: null });
+              else {
+                const v = parseFloat(raw);
+                if (!isNaN(v)) update({ coast_cool_temp: toCelsius(v, this.hass) });
+              }
             }}
-            @closed=${(e: Event) => e.stopPropagation()}
-            fixedMenuPosition
-            style="width:100%"
-          ></ha-select>
+          ></ha-textfield>
         </div>
+        <div class="hint">${localize("tou.rule_coast_note", l)}</div>
+        <ha-select
+          .label=${localize("tou.rule_end_mode", l)}
+          .value=${rule.end.mode}
+          .options=${END_MODES.map((m) => ({ value: m, label: localize(`tou.end.${m}`, l) }))}
+          @selected=${(e: Event) => {
+            const v = getSelectValue(e);
+            if (v !== null)
+              update({ end: { mode: v as (typeof END_MODES)[number], value: rule.end.value } });
+          }}
+          @closed=${(e: Event) => e.stopPropagation()}
+          fixedMenuPosition
+          style="width:100%;margin-top:4px"
+        ></ha-select>
 
         <div class="field-block">
           ${
@@ -991,7 +1015,8 @@ export class RsSettingsTou extends LitElement {
         enabled: true,
         rooms: [],
         trigger: { from_tier: "ultra_low", to_tier: "peak" },
-        coast_temp: 18,
+        coast_heat_temp: 18,
+        coast_cool_temp: null,
         end: { mode: "tier_window", value: "off" },
         post_hold: "schedule",
       },

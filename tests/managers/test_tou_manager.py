@@ -620,6 +620,61 @@ def test_coast_window_tier_window_and_cap() -> None:
     assert adjust(boundary + 91 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
 
 
+def test_coast_rule_side_blanks_skip_per_mode() -> None:
+    """A blank coast side skips this rule in that mode; plain shaping applies there."""
+    mgr = TouManager(_make_hass({}))
+    boundary = time.time() + 30.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=time.time(), end=boundary, tier=TOU_TIER_ULTRA_LOW),
+            TouSegment(start=boundary, end=time.time() + 16 * 3600.0, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_ULTRA_LOW,
+        current_rate=None,
+    )
+
+    def rule(**extra: object) -> dict:
+        base: dict = {
+            "id": "r",
+            "name": "n",
+            "enabled": True,
+            "rooms": ["living"],
+            "trigger": {"from_tier": "ultra_low", "to_tier": "peak"},
+            "end": {"mode": "duration", "value": 120},
+            "post_hold": "schedule",
+        }
+        base.update(extra)
+        return base
+
+    # Both sides set: each coasts to its own value within the same window.
+    adjust = mgr.make_adjuster(_room(), {"tou_coast_rules": [rule(coast_heat_temp=18.5, coast_cool_temp=26.0)]})
+    assert adjust is not None
+    out = adjust(boundary + 60.0, TargetTemps(heat=21.0, cool=24.0))
+    assert out.heat == 18.5
+    assert out.cool == 26.0
+
+    # Heating blank: the rule is skipped there (plain peak cap applies), cooling coasts.
+    adjust = mgr.make_adjuster(_room(), {"tou_coast_rules": [rule(coast_heat_temp=None, coast_cool_temp=26.0)]})
+    assert adjust is not None
+    out = adjust(boundary + 60.0, TargetTemps(heat=21.0, cool=24.0))
+    assert out.heat == 18.0
+    assert out.cool == 26.0
+
+    # Both blank: no window at all — plain peak shaping on both sides.
+    adjust = mgr.make_adjuster(_room(), {"tou_coast_rules": [rule(coast_heat_temp=None, coast_cool_temp=None)]})
+    assert adjust is not None
+    out = adjust(boundary + 60.0, TargetTemps(heat=21.0, cool=24.0))
+    assert out.heat == 18.0
+    assert out.cool == 28.0
+
+    # Legacy single coast_temp: unchanged behavior, seeds both sides.
+    adjust = mgr.make_adjuster(_room(), {"tou_coast_rules": [rule(coast_temp=18.5)]})
+    assert adjust is not None
+    out = adjust(boundary + 60.0, TargetTemps(heat=21.0, cool=24.0))
+    assert out.heat == 18.5
+    assert out.cool == 24.0
+
+
 def test_coast_window_any_tier_end() -> None:
     """'' as the tier_window value ends the coast at the next change of any tier."""
     mgr = TouManager(_make_hass({}))
