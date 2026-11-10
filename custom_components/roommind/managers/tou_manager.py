@@ -55,6 +55,7 @@ from ..const import (
     TOU_TIER_ULTRA_LOW,
     TOU_TIER_UNKNOWN,
     TOU_TIMELINE_HORIZON_MINUTES,
+    TOU_WEEKDAYS,
     TargetTemps,
     tou_price_multiplier,
 )
@@ -181,6 +182,9 @@ class TouManager:
                 for ev_start, ev_end in await self._async_calendar_windows(entity_id, now, horizon):
                     points.update((ev_start, ev_end))
                     events.append((ev_start, ev_end, tier))
+            for win_start, win_end, win_tier in self._rate_window_events(settings, now, horizon):
+                points.update((win_start, win_end))
+                events.append((win_start, win_end, win_tier))
 
         if not events and lookahead in ("auto", "next_change", "next_change_rate"):
             next_ts, next_tier = self._resolve_next_change(settings, lookahead)
@@ -282,6 +286,8 @@ class TouManager:
         if raw is None:
             return None, TOU_TIER_UNKNOWN
         if lookahead == "next_change_rate":
+            if not self._thresholds_present(settings):
+                return None, TOU_TIER_UNKNOWN
             next_rate = self._read_float_state(str(settings.get("tou_next_rate_entity") or ""))
             tier = self._tier_from_rate(next_rate, settings)
             if tier == TOU_TIER_UNKNOWN:
@@ -289,7 +295,7 @@ class TouManager:
             return raw.timestamp(), tier
         tier = str(settings.get("tou_next_change_tier") or "")
         if tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
-            if lookahead == "auto" and settings.get("tou_next_rate_entity"):
+            if lookahead == "auto" and settings.get("tou_next_rate_entity") and self._thresholds_present(settings):
                 tier = self._tier_from_rate(self._read_float_state(str(settings["tou_next_rate_entity"])), settings)
                 if tier != TOU_TIER_UNKNOWN:
                     return raw.timestamp(), tier
@@ -307,6 +313,70 @@ class TouManager:
             return float(state.state)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _thresholds_present(settings: dict[str, Any]) -> bool:
+        return any(
+            isinstance(settings.get(key), (int, float))
+            for key in ("tou_peak_threshold", "tou_mid_threshold", "tou_ultra_threshold")
+        )
+
+    @staticmethod
+    def _hhmm_minutes(hhmm: str) -> int | None:
+        parts = hhmm.split(":")
+        if len(parts) < 2:
+            return None
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            return None
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour * 60 + minute
+
+    def _rate_window_events(
+        self, settings: dict[str, Any], now: float, horizon: float
+    ) -> list[tuple[float, float, str]]:
+        """Materialize manual tariff-window rows into [start, end, tier] events.
+
+        Each row applies its rate between two wall-clock times on the chosen
+        weekdays (no day ticked = every day; an end not after the start wraps
+        past midnight). Rates map to tiers through the cost thresholds —
+        without any threshold configured the rows cannot classify and are
+        ignored rather than guessed.
+        """
+        rows = settings.get("tou_rate_windows")
+        if not isinstance(rows, list) or not rows or not self._thresholds_present(settings):
+            return []
+        out: list[tuple[float, float, str]] = []
+        base = dt_util.as_local(dt_util.utc_from_timestamp(now)).replace(hour=0, minute=0, second=0, microsecond=0)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            rate = row.get("rate")
+            if not isinstance(rate, (int, float)):
+                continue
+            tier = self._tier_from_rate(float(rate), settings)
+            if tier == TOU_TIER_UNKNOWN:
+                continue
+            start_min = self._hhmm_minutes(str(row.get("start") or ""))
+            end_min = self._hhmm_minutes(str(row.get("end") or ""))
+            if start_min is None or end_min is None:
+                continue
+            days = {str(d) for d in row.get("days") or [] if isinstance(d, str)}
+            for offset in range(-1, 3):
+                day = base + timedelta(days=offset)
+                if days and TOU_WEEKDAYS[day.weekday()] not in days:
+                    continue
+                start_dt = day.replace(hour=start_min // 60, minute=start_min % 60)
+                end_dt = day.replace(hour=end_min // 60, minute=end_min % 60)
+                if end_dt <= start_dt:
+                    end_dt += timedelta(days=1)
+                start = max(start_dt.timestamp(), now)
+                end = min(end_dt.timestamp(), horizon)
+                if start < end:
+                    out.append((start, end, tier))
+        return out
 
     async def _async_calendar_windows(self, entity_id: str, now: float, horizon: float) -> list[tuple[float, float]]:
         """Return [start, end] epoch windows of running/upcoming events, clamped to the horizon."""

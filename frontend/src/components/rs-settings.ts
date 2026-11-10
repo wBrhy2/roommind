@@ -13,6 +13,7 @@ import type {
   CompressorGroup,
   RoomWithoutArea,
   TouCalendarBinding,
+  TouRateWindow,
   TouCoastRule,
 } from "../types";
 import { localize } from "../utils/localize";
@@ -84,6 +85,7 @@ export class RsSettings extends LitElement {
   @state() private _touNextRateEntity = "";
   @state() private _touNextChangeTier = "peak";
   @state() private _touCalendarEntities: TouCalendarBinding[] = [];
+  @state() private _touRateWindows: TouRateWindow[] = [];
   @state() private _touFlagEntities: Record<string, string> = {};
   @state() private _touPriceWeighting = true;
   @state() private _touThresholds: Record<string, string> = {};
@@ -172,6 +174,7 @@ export class RsSettings extends LitElement {
       this._touNextRateEntity = s.tou_next_rate_entity ?? "";
       this._touNextChangeTier = s.tou_next_change_tier ?? "peak";
       this._touCalendarEntities = s.tou_calendar_entities ?? [];
+      this._touRateWindows = s.tou_rate_windows ?? [];
       this._touFlagEntities = s.tou_flag_entities ?? {};
       this._touPriceWeighting = s.tou_price_weighting ?? true;
       this._touThresholds = {
@@ -358,6 +361,7 @@ export class RsSettings extends LitElement {
           .touNextRateEntity=${this._touNextRateEntity}
           .touNextChangeTier=${this._touNextChangeTier}
           .touCalendarEntities=${this._touCalendarEntities}
+          .touRateWindows=${this._touRateWindows}
           .touFlagEntities=${this._touFlagEntities}
           .touPriceWeighting=${this._touPriceWeighting}
           .touThresholds=${this._touThresholds}
@@ -562,6 +566,7 @@ export class RsSettings extends LitElement {
         tou_next_rate_entity: this._touNextRateEntity,
         tou_next_change_tier: this._touNextChangeTier,
         tou_calendar_entities: this._touCalendarEntities.filter((c) => c.entity_id),
+        tou_rate_windows: this._touRateWindows.filter((w) => w.start && w.end),
         tou_flag_entities: Object.fromEntries(
           Object.entries(this._touFlagEntities).filter(([, v]) => v),
         ),

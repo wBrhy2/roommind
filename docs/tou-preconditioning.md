@@ -33,7 +33,10 @@ the currently active tier applies):
   one per tier. Their events give RoomMind the *entire future tariff
   timeline*: exact peak windows in both directions, which is what coasting
   and pre-conditioning plan against. Works with the built-in **Local
-  Calendar** integration — no automations required.
+  Calendar** integration — no automations required. No calendar entities?
+  Define **manual tariff windows** in the same branch instead: rows of
+  rate + start + end + weekdays, repeating every matching day (an end
+  before the start runs past midnight), with a spare `+` row to add more.
 - **Next-change rate sensor** (default) — some providers publish not only
   *when* the next change starts but *what the price will be* after it (a
   "next rate" entity). Bind it alongside the next-change timestamp and
@@ -106,9 +109,11 @@ inverter/meter can publish the surplus state instead of a tariff:
   through the peak that follows.
 - Predictable patterns — "solar surplus roughly 10:00–15:00 in spring" — can
   be expressed with a calendar on the ultra-low tier, and the MPC will plan
-  the soak-up around its forecast; the helper approach captures the actual,
-  dynamic surplus. The two can coexist: calendars give the future, the
-  period/cost helper corrects the present.
+  the soak-up around its forecast; without calendar entities, the same
+  pattern fits a **manual tariff window** (a near-zero rate, those hours,
+  those weekdays). The helper approach captures the actual, dynamic surplus.
+  The two can coexist: calendars or windows give the future, the period/cost
+  helper corrects the present.
 
 Treat it as comfort-buffered storage: the clamps (`Lowest/Highest allowed
 target`) and per-room boost caps are what stop a bright March noon from

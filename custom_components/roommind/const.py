@@ -268,6 +268,9 @@ TOU_MODES = [TOU_MODE_OFF, TOU_MODE_SETBACK, TOU_MODE_SETBACK_BOOST]
 TOU_TIER_SOURCES = ["auto", "period", "rate", "flags"]
 TOU_LOOKAHEADS = ["auto", "calendar", "next_change_rate", "next_change", "none"]
 
+# Canonical weekday names for manual tariff windows (date.weekday() order).
+TOU_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
 # Coast-rule end modes and post-hold behavior.
 TOU_END_MODES = ["duration", "clock", "tier_window"]
 TOU_POST_HOLD_MODES = ["stay", "schedule"]

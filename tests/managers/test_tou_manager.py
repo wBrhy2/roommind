@@ -14,6 +14,7 @@ from custom_components.roommind.const import (
     TOU_TIER_PEAK,
     TOU_TIER_ULTRA_LOW,
     TOU_TIER_UNKNOWN,
+    TOU_WEEKDAYS,
     TargetTemps,
 )
 from custom_components.roommind.managers.tou_manager import (
@@ -364,6 +365,73 @@ async def test_lookahead_next_change_rate() -> None:
     )
     timeline = await mgr.async_build_timeline({**base, "tou_lookahead": "next_change_rate"})
     assert timeline is not None and len(timeline.segments) == 1
+
+
+def test_rate_window_events_and_guards() -> None:
+    """Manual tariff rows paint tier events; inert input is ignored, never guessed."""
+    from homeassistant.util import dt as dt_util
+
+    now = time.time()
+    horizon = now + 16 * 3600.0
+    mgr = TouManager(_make_hass({}))
+
+    # end == start wraps a full 24 h, so the window always covers "now".
+    all_day = [{"id": "w1", "rate": 0.24, "start": "00:00", "end": "00:00", "days": []}]
+    events = mgr._rate_window_events({"tou_peak_threshold": 0.20, "tou_rate_windows": all_day}, now, horizon)
+    assert events and all(tier == TOU_TIER_PEAK for _, _, tier in events)
+    assert any(start <= now < end for start, end, _ in events)
+
+    # no thresholds configured -> rates cannot classify; rows stay inert.
+    assert mgr._rate_window_events({"tou_rate_windows": all_day}, now, horizon) == []
+
+    # a weekday that cannot occur inside the horizon matches nothing.
+    today = dt_util.as_local(dt_util.utc_from_timestamp(now)).weekday()
+    far = TOU_WEEKDAYS[(today + 3) % 7]
+    inert = mgr._rate_window_events(
+        {
+            "tou_peak_threshold": 0.20,
+            "tou_rate_windows": [{"id": "w2", "rate": 0.30, "start": "10:00", "end": "11:00", "days": [far]}],
+        },
+        now,
+        horizon,
+    )
+    assert inert == []
+
+    # end before start runs past midnight: two-hour events, never longer.
+    wrapped = mgr._rate_window_events(
+        {
+            "tou_peak_threshold": 0.20,
+            "tou_rate_windows": [{"id": "w3", "rate": 0.24, "start": "23:00", "end": "01:00", "days": []}],
+        },
+        now,
+        horizon,
+    )
+    assert wrapped and all(0 < end - start <= 2 * 3600.0 for start, end, _ in wrapped)
+
+
+@pytest.mark.asyncio
+async def test_rate_window_paints_timeline_and_beats_next_change() -> None:
+    """Windows are calendar-grade future: they paint over the tier and skip the fallback."""
+    from homeassistant.util import dt as dt_util
+
+    now = time.time()
+    nx = dt_util.utc_from_timestamp(now + 2 * 3600.0).isoformat()
+    hass = _make_hass({"sensor.period": "ulo_off_peak", "sensor.nx": nx})
+    mgr = TouManager(hass)
+    timeline = await mgr.async_build_timeline(
+        {
+            "tou_enabled": True,
+            "tou_period_entity": "sensor.period",
+            "tou_peak_threshold": 0.20,
+            "tou_next_change_entity": "sensor.nx",
+            "tou_next_change_tier": "mid",
+            "tou_rate_windows": [{"id": "all", "rate": 0.24, "start": "00:00", "end": "00:00", "days": []}],
+        }
+    )
+    assert timeline is not None
+    assert timeline.tier_at(now + 60) == TOU_TIER_PEAK
+    # windows count as events, so the next-change "mid" step never applies.
+    assert timeline.tier_at(now + 2 * 3600.0 + 30) == TOU_TIER_PEAK
 
 
 @pytest.mark.asyncio

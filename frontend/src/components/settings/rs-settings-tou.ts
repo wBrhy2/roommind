@@ -25,6 +25,7 @@ import type {
   TouCalendarBinding,
   TouCoastRule,
   TouLookahead,
+  TouRateWindow,
   TouTier,
   TouTierSource,
 } from "../../types";
@@ -45,6 +46,15 @@ import { inputStyles } from "../../styles/input-styles";
 
 const TOU_TIERS: TouTier[] = ["peak", "mid", "off", "ultra_low"];
 const ANY_TIER = "__any";
+const WEEKDAYS = [
+  { value: "monday", abbr: "Mo", key: "mon" },
+  { value: "tuesday", abbr: "Tu", key: "tue" },
+  { value: "wednesday", abbr: "We", key: "wed" },
+  { value: "thursday", abbr: "Th", key: "thu" },
+  { value: "friday", abbr: "Fr", key: "fri" },
+  { value: "saturday", abbr: "Sa", key: "sat" },
+  { value: "sunday", abbr: "Su", key: "sun" },
+] as const;
 const END_MODES = ["duration", "clock", "tier_window"] as const;
 const CLOSE_ICON =
   "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z";
@@ -61,6 +71,7 @@ export class RsSettingsTou extends LitElement {
   @property({ type: String }) public touNextRateEntity = "";
   @property({ type: String }) public touNextChangeTier: TouTier | "" = "peak";
   @property({ type: Array }) public touCalendarEntities: TouCalendarBinding[] = [];
+  @property({ type: Array }) public touRateWindows: TouRateWindow[] = [];
   @property({ attribute: false }) public touFlagEntities: Record<string, string> = {};
   @property({ type: Boolean }) public touPriceWeighting = true;
   @property({ attribute: false }) public touThresholds: Record<string, string> = {};
@@ -153,6 +164,43 @@ export class RsSettingsTou extends LitElement {
         flex: 1;
         min-width: 0;
       }
+      .window-row {
+        display: flex;
+        align-items: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .window-row ha-textfield {
+        flex: 1;
+        min-width: 90px;
+      }
+      .window-days {
+        display: flex;
+        gap: 2px;
+      }
+      .day-chip {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        font-size: 11px;
+        color: var(--secondary-text-color);
+        cursor: pointer;
+        padding: 2px 3px;
+      }
+      .day-chip input {
+        accent-color: var(--accent-color);
+      }
+      .window-row--add {
+        align-items: center;
+        border: 1px dashed var(--divider-color);
+        border-radius: 8px;
+        padding: 10px 12px;
+        cursor: pointer;
+        color: var(--secondary-text-color);
+        gap: 10px;
+      }
       .fine-tune-row {
         display: flex;
         align-items: flex-start;
@@ -222,7 +270,11 @@ export class RsSettingsTou extends LitElement {
   /** The lookahead source the panel shows: explicit choice, else what is bound. */
   private _lookaheadMode(): Exclude<TouLookahead, "auto"> {
     if (this.touLookahead !== "auto") return this.touLookahead;
-    if (this.touCalendarEntities.some((c) => c.entity_id)) return "calendar";
+    if (
+      this.touCalendarEntities.some((c) => c.entity_id) ||
+      this.touRateWindows.some((w) => w.start && w.end)
+    )
+      return "calendar";
     if (this.touNextRateEntity) return "next_change_rate";
     if (this.touNextChangeEntity) return "next_change";
     return "next_change_rate";
@@ -366,14 +418,21 @@ export class RsSettingsTou extends LitElement {
                 ${
                   look === "calendar"
                     ? html`${this.touCalendarEntities.map((c, idx) => this._renderCalendarRow(c, idx))}
-                      ${
-                        this.touCalendarEntities.length < 4
-                          ? html`<ha-button class="add-button" @click=${this._addCalendar}>
-                              <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
-                              ${localize("tou.add_calendar", l)}
-                            </ha-button>`
-                          : nothing
-                      }`
+                        ${
+                          this.touCalendarEntities.length < 4
+                            ? html`<ha-button class="add-button" @click=${this._addCalendar}>
+                                <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
+                                ${localize("tou.add_calendar", l)}
+                              </ha-button>`
+                            : nothing
+                        }
+                        <div class="section-label">${localize("tou.rate_windows", l)}</div>
+                        <div class="hint">${localize("tou.rate_windows_hint", l)}</div>
+                        ${this.touRateWindows.map((w, idx) => this._renderRateWindow(w, idx))}
+                        <div class="window-row window-row--add" @click=${this._addRateWindow}>
+                          <ha-icon icon="mdi:plus"></ha-icon>
+                          <span>${localize("tou.add_window", l)}</span>
+                        </div>`
                     : nothing
                 }
                 ${
@@ -398,13 +457,7 @@ export class RsSettingsTou extends LitElement {
                               : nothing
                           }
                         </div>
-                        <div class="hint">${localize("tou.next_rate_hint", l)}</div>
-                        <div class="section-label">${localize("tou.thresholds", l)}</div>
-                        <div class="tier-grid">
-                          ${this._optionalNumberField("tou_peak_threshold", localize("tou.peak_threshold", l))}
-                          ${this._optionalNumberField("tou_mid_threshold", localize("tou.mid_threshold", l))}
-                          ${this._optionalNumberField("tou_ultra_threshold", localize("tou.ultra_threshold", l))}
-                        </div>`
+                        <div class="hint">${localize("tou.next_rate_hint", l)}</div>`
                     : nothing
                 }
                 ${
@@ -845,6 +898,78 @@ export class RsSettingsTou extends LitElement {
       ...this.touCalendarEntities,
       { entity_id: "", tier: "peak" as TouTier },
     ]);
+  }
+
+  private _addRateWindow() {
+    this._fire("touRateWindows", [
+      ...this.touRateWindows,
+      {
+        id: self.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        rate: 0,
+        start: "",
+        end: "",
+        days: [],
+      },
+    ]);
+  }
+
+  private _renderRateWindow(win: TouRateWindow, idx: number) {
+    const l = this.hass.language;
+    const update = (patch: Partial<TouRateWindow>) => {
+      const updated = [...this.touRateWindows];
+      updated[idx] = { ...updated[idx], ...patch };
+      this._fire("touRateWindows", updated);
+    };
+    const toggleDay = (day: string) =>
+      update({
+        days: win.days.includes(day) ? win.days.filter((d) => d !== day) : [...win.days, day],
+      });
+    return html`<div class="window-row">
+      <ha-textfield
+        type="number"
+        step="0.001"
+        .value=${String(win.rate)}
+        .label=${localize("tou.win_rate", l)}
+        @change=${(e: Event) => {
+          const v = parseFloat((e.target as HTMLInputElement).value);
+          if (!isNaN(v)) update({ rate: v });
+        }}
+      ></ha-textfield>
+      <ha-textfield
+        .value=${win.start}
+        .label=${localize("tou.win_start", l)}
+        pattern="[0-9]{1,2}:[0-9]{2}"
+        @change=${(e: Event) => update({ start: (e.target as HTMLInputElement).value })}
+      ></ha-textfield>
+      <ha-textfield
+        .value=${win.end}
+        .label=${localize("tou.win_end", l)}
+        pattern="[0-9]{1,2}:[0-9]{2}"
+        @change=${(e: Event) => update({ end: (e.target as HTMLInputElement).value })}
+      ></ha-textfield>
+      <div class="window-days">
+        ${WEEKDAYS.map(
+          (d) =>
+            html`<label class="day-chip" title=${localize(`tou.day.${d.key}`, l)}>
+              <input
+                type="checkbox"
+                .checked=${win.days.includes(d.value)}
+                @change=${() => toggleDay(d.value)}
+              />
+              <span>${d.abbr}</span>
+            </label>`,
+        )}
+      </div>
+      <ha-icon-button
+        .path=${CLOSE_ICON}
+        .label=${localize("tou.clear", l)}
+        @click=${() =>
+          this._fire(
+            "touRateWindows",
+            this.touRateWindows.filter((_, i) => i !== idx),
+          )}
+      ></ha-icon-button>
+    </div>`;
   }
 
   private _addRule() {

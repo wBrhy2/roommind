@@ -3458,6 +3458,43 @@ async def test_save_settings_tou_any_tier_window(ws_hass, store, connection):
 
 
 @pytest.mark.asyncio
+async def test_save_settings_tou_rate_windows(ws_hass, store, connection):
+    """Manual tariff windows persist with their weekday lists and wrapping times."""
+    await store.async_load()
+
+    msg = {
+        "id": 66,
+        "type": "roommind/settings/save",
+        "tou_rate_windows": [
+            {"id": "night", "rate": 0.24, "start": "22:00", "end": "06:00", "days": ["monday", "tuesday"]},
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    settings = connection.send_result.call_args[0][1]["settings"]
+    assert settings["tou_rate_windows"][0]["end"] == "06:00"
+    assert settings["tou_rate_windows"][0]["days"] == ["monday", "tuesday"]
+
+
+@pytest.mark.parametrize(("start", "days"), [("25:00", ["monday"]), ("07:00", ["funday"])])
+@pytest.mark.asyncio
+async def test_save_settings_tou_rate_windows_invalid(ws_hass, store, connection, start, days):
+    """Wall-clock format and weekday names are validated before persisting."""
+    await store.async_load()
+
+    msg = {
+        "id": 67,
+        "type": "roommind/settings/save",
+        "tou_rate_windows": [{"id": "x", "rate": 0.1, "start": start, "end": "08:00", "days": days}],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    assert connection.send_result.call_count == 0
+    assert connection.send_error.call_args[0][1] in ("invalid_tou_window_time", "invalid_tou_window_days")
+
+
+@pytest.mark.asyncio
 async def test_save_room_tou_fields(ws_hass, store, connection):
     """Per-room Time-of-Use fields persist on the room."""
     await store.async_load()

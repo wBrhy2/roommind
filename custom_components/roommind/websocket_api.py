@@ -31,6 +31,7 @@ from .const import (
     TOU_POST_HOLD_MODES,
     TOU_TIER_SOURCES,
     TOU_TIERS,
+    TOU_WEEKDAYS,
     build_override_live,
     is_override_suppressed,
 )
@@ -222,6 +223,7 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_next_rate_entity",
     "tou_next_change_tier",
     "tou_calendar_entities",
+    "tou_rate_windows",
     "tou_flag_entities",
     "tou_price_weighting",
     "tou_peak_threshold",
@@ -871,6 +873,15 @@ async def websocket_get_settings(
             ],
             vol.Length(max=4),
         ),
+        vol.Optional("tou_rate_windows"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("rate"): vol.Coerce(float),
+                vol.Required("start"): str,
+                vol.Required("end"): str,
+                vol.Optional("days", default=[]): [str],
+            }
+        ],
         vol.Optional("tou_flag_entities"): {vol.In(TOU_TIERS): str},
         vol.Optional("tou_price_weighting"): bool,
         vol.Optional("tou_peak_threshold"): vol.Any(None, vol.Coerce(float)),
@@ -1028,6 +1039,37 @@ async def websocket_save_settings(
                     msg["id"],
                     "invalid_tou_coast_tier",
                     f"tier_window coast rules need one of {', '.join(TOU_TIERS)}, or '' for any change",
+                )
+                return
+
+    windows = changes.get("tou_rate_windows")
+    if windows:
+        for w in windows:
+            for key in ("start", "end"):
+                raw = str(w.get(key) or "")
+                if not raw:
+                    continue
+                parts = raw.split(":")
+                ok = (
+                    len(parts) >= 2
+                    and parts[0].isdigit()
+                    and parts[1].isdigit()
+                    and 0 <= int(parts[0]) <= 23
+                    and 0 <= int(parts[1]) <= 59
+                )
+                if not ok:
+                    connection.send_error(
+                        msg["id"],
+                        "invalid_tou_window_time",
+                        f"Tariff windows need '{key}' as 'HH:MM'",
+                    )
+                    return
+            bad = [d for d in (w.get("days") or []) if d not in TOU_WEEKDAYS]
+            if bad:
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_window_days",
+                    f"Tariff window days must be weekday names, not {bad}",
                 )
                 return
 

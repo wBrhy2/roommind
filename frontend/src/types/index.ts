@@ -143,6 +143,17 @@ export interface TouCalendarBinding {
   tier: TouTier;
 }
 
+/** Manual tariff-window row: a rate applied between two wall-clock times on
+ * the chosen weekdays. Empty days list = every day; an end not after the
+ * start wraps past midnight. Maps to a tier through the cost thresholds. */
+export interface TouRateWindow {
+  id: string;
+  rate: number;
+  start: string;
+  end: string;
+  days: string[];
+}
+
 /** A stored room whose Home Assistant area was deleted; it rests until the area is back (#494). */
 export interface RoomWithoutArea {
   area_id: string;
@@ -273,6 +284,7 @@ export interface GlobalSettings {
   /** "" = no lookahead (the next-change step is disabled). */
   tou_next_change_tier?: TouTier | "";
   tou_calendar_entities?: TouCalendarBinding[];
+  tou_rate_windows?: TouRateWindow[];
   tou_flag_entities?: Partial<Record<TouTier, string>>;
   tou_price_weighting?: boolean;
   tou_peak_threshold?: number | null;
