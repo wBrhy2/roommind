@@ -227,3 +227,6 @@ docs/plans/
 # Worktrees
 .worktrees/
 
+# Local sim scenarios / previews, never shipped
+/dev/sim/local/
+

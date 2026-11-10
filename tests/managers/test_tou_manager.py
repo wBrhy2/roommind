@@ -169,8 +169,12 @@ async def test_unknown_source_shapes_nothing() -> None:
 @pytest.mark.asyncio
 async def test_calendar_events_build_segments() -> None:
     now = time.time()
-    start_iso = "2026-11-06T07:00:00-05:00"
-    end_iso = "2026-11-06T12:00:00-05:00"
+    # Relative to now: absolute dates go stale the moment they fall behind the
+    # clock, and past events are outside the horizon by design.
+    from homeassistant.util import dt as dt_util
+
+    start_iso = dt_util.utc_from_timestamp(now + 2 * 3600.0).isoformat()
+    end_iso = dt_util.utc_from_timestamp(now + 7 * 3600.0).isoformat()
     hass = _make_hass({"sensor.rate_period": "ulo_off_peak", "calendar.tou_peak": "on"})
     hass.services.async_call = AsyncMock(
         return_value={
@@ -186,14 +190,11 @@ async def test_calendar_events_build_segments() -> None:
         }
     )
     assert timeline is not None
-    from homeassistant.util import dt as dt_util
-
     parsed = dt_util.parse_datetime(start_iso).timestamp()
     # The event window paints its tier wherever it lands, and where it does not
     # cover a timestamp, the current tier still rules there.
     assert timeline.tier_at(parsed + 60) == TOU_TIER_PEAK
-    if parsed > now:
-        assert timeline.tier_at(now + 1) == TOU_TIER_OFF
+    assert timeline.tier_at(now + 1) == TOU_TIER_OFF
 
 
 @pytest.mark.asyncio
