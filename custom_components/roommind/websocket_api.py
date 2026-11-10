@@ -26,8 +26,10 @@ from .const import (
     TOU_COAST_DURATION_MAX_MINUTES,
     TOU_COAST_DURATION_MIN_MINUTES,
     TOU_END_MODES,
+    TOU_LOOKAHEADS,
     TOU_MODES,
     TOU_POST_HOLD_MODES,
+    TOU_TIER_SOURCES,
     TOU_TIERS,
     build_override_live,
     is_override_suppressed,
@@ -212,6 +214,8 @@ _SETTINGS_SAVE_FIELDS = (
     "group_by_floor",
     "compressor_groups",
     "tou_enabled",
+    "tou_tier_source",
+    "tou_lookahead",
     "tou_rate_entity",
     "tou_period_entity",
     "tou_next_change_entity",
@@ -850,10 +854,12 @@ async def websocket_get_settings(
             }
         ],
         vol.Optional("tou_enabled"): bool,
+        vol.Optional("tou_tier_source"): vol.In(TOU_TIER_SOURCES),
+        vol.Optional("tou_lookahead"): vol.In(TOU_LOOKAHEADS),
         vol.Optional("tou_rate_entity"): str,
         vol.Optional("tou_period_entity"): str,
         vol.Optional("tou_next_change_entity"): str,
-        vol.Optional("tou_next_change_tier"): vol.In(TOU_TIERS),
+        vol.Optional("tou_next_change_tier"): vol.Any("", vol.In(TOU_TIERS)),
         vol.Optional("tou_calendar_entities"): vol.All(
             [
                 {

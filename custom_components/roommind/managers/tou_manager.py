@@ -152,7 +152,10 @@ class TouManager:
 
         Returns None when the feature is disabled. A missing or unavailable
         source yields a timeline with ``current_tier`` unknown, which shapes
-        nothing — behavior is identical to TOU being off.
+        nothing — behavior is identical to TOU being off. ``tou_lookahead``
+        picks which future source counts (calendars, next-change, or none);
+        "auto" keeps the legacy order: calendars, with next-change as the
+        fallback when no calendar window covers the horizon.
         """
         if not settings.get("tou_enabled", False):
             self._timeline = None
@@ -166,18 +169,20 @@ class TouManager:
         self._source_kind = source
         self._rate_unit = unit
 
+        lookahead = str(settings.get("tou_lookahead") or "auto")
         points: set[float] = {now, horizon}
         events: list[tuple[float, float, str]] = []
-        for entry in settings.get("tou_calendar_entities") or []:
-            entity_id = str(entry.get("entity_id", ""))
-            tier = str(entry.get("tier", ""))
-            if not entity_id or tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
-                continue
-            for ev_start, ev_end in await self._async_calendar_windows(entity_id, now, horizon):
-                points.update((ev_start, ev_end))
-                events.append((ev_start, ev_end, tier))
+        if lookahead in ("auto", "calendar"):
+            for entry in settings.get("tou_calendar_entities") or []:
+                entity_id = str(entry.get("entity_id", ""))
+                tier = str(entry.get("tier", ""))
+                if not entity_id or tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
+                    continue
+                for ev_start, ev_end in await self._async_calendar_windows(entity_id, now, horizon):
+                    points.update((ev_start, ev_end))
+                    events.append((ev_start, ev_end, tier))
 
-        if not events:
+        if not events and lookahead in ("auto", "next_change"):
             next_ts, next_tier = self._resolve_next_change(settings)
             if next_ts is not None and now < next_ts < horizon:
                 points.add(next_ts)
@@ -189,9 +194,16 @@ class TouManager:
         return timeline
 
     def _resolve_current_tier(self, settings: dict[str, Any]) -> tuple[str, float | None, str, str]:
-        """Return (tier, rate, rate_unit, source_kind) for *now*."""
+        """Return (tier, rate, rate_unit, source_kind) for *now*.
+
+        ``tou_tier_source`` selects which source may answer; "auto" keeps the
+        legacy cascade (period -> flags -> rate). The numeric rate is always
+        read when a cost sensor is bound — it feeds the rate sensors and the
+        price display even when another source classifies the tier.
+        """
+        mode = str(settings.get("tou_tier_source") or "auto")
         period_entity = str(settings.get("tou_period_entity") or "")
-        if period_entity:
+        if period_entity and mode in ("auto", "period"):
             state = self.hass.states.get(period_entity)
             if state is not None and state.state not in ("unavailable", "unknown"):
                 tier = normalize_period_state(state.state)
@@ -200,7 +212,7 @@ class TouManager:
                     return tier, rate, unit, TOU_SOURCE_PERIOD
 
         flags = settings.get("tou_flag_entities") or {}
-        if isinstance(flags, dict):
+        if isinstance(flags, dict) and mode in ("auto", "flags"):
             for tier, entity_id in flags.items():
                 if not entity_id or not isinstance(entity_id, str):
                     continue
@@ -210,6 +222,8 @@ class TouManager:
                     return str(tier), rate, unit, TOU_SOURCE_FLAGS
 
         rate, unit = self._read_rate(settings)
+        if mode not in ("auto", "rate"):
+            return TOU_TIER_UNKNOWN, rate, unit, TOU_SOURCE_NONE
         tier = self._tier_from_rate(rate, settings)
         if tier != TOU_TIER_UNKNOWN:
             return tier, rate, unit, TOU_SOURCE_RATE
@@ -246,9 +260,16 @@ class TouManager:
         return TOU_TIER_OFF
 
     def _resolve_next_change(self, settings: dict[str, Any]) -> tuple[float | None, str]:
-        """Read the next-change timestamp sensor and the assumed tier after it."""
+        """Read the next-change timestamp sensor and the assumed tier after it.
+
+        An unbound entity or an unselected "leads into" tier yields no
+        lookahead at all — a half-configured source never guesses a tier.
+        """
         entity_id = str(settings.get("tou_next_change_entity") or "")
         if not entity_id:
+            return None, TOU_TIER_UNKNOWN
+        tier = str(settings.get("tou_next_change_tier") or "")
+        if tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
             return None, TOU_TIER_UNKNOWN
         state = self.hass.states.get(entity_id)
         if state is None or state.state in ("unavailable", "unknown"):
@@ -260,9 +281,6 @@ class TouManager:
             raw = dt_util.parse_datetime(str(state.state))
         if raw is None:
             return None, TOU_TIER_UNKNOWN
-        tier = str(settings.get("tou_next_change_tier") or TOU_TIER_PEAK)
-        if tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
-            tier = TOU_TIER_PEAK
         return raw.timestamp(), tier
 
     async def _async_calendar_windows(self, entity_id: str, now: float, horizon: float) -> list[tuple[float, float]]:

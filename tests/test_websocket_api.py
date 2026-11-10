@@ -3301,7 +3301,10 @@ async def test_save_settings_tou_valid(ws_hass, store, connection):
         "id": 60,
         "type": "roommind/settings/save",
         "tou_enabled": True,
+        "tou_tier_source": "period",
+        "tou_lookahead": "calendar",
         "tou_rate_entity": "sensor.hydro_one_rate",
+        "tou_next_change_tier": "",
         "tou_calendar_entities": [{"entity_id": "calendar.ultou_peak", "tier": "peak"}],
         "tou_coast_rules": [
             {
@@ -3320,6 +3323,9 @@ async def test_save_settings_tou_valid(ws_hass, store, connection):
     connection.send_result.assert_called_once()
     settings = connection.send_result.call_args[0][1]["settings"]
     assert settings["tou_enabled"] is True
+    assert settings["tou_tier_source"] == "period"
+    assert settings["tou_lookahead"] == "calendar"
+    assert settings["tou_next_change_tier"] == ""
     assert settings["tou_coast_rules"][0]["end"] == {"mode": "duration", "value": 120}
 
 

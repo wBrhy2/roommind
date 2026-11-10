@@ -219,6 +219,103 @@ async def test_next_change_sensor_step() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tier_source_mode_pins_the_source() -> None:
+    """An explicit tier source ignores the others, even while they stay bound."""
+    hass = _make_hass(
+        {
+            "sensor.period": "on_peak",
+            "input_boolean.flag_off": "on",
+            "sensor.rate": "0.22",
+        }
+    )
+    base: dict = {
+        "tou_enabled": True,
+        "tou_period_entity": "sensor.period",
+        "tou_flag_entities": {"off": "input_boolean.flag_off"},
+        "tou_rate_entity": "sensor.rate",
+        "tou_peak_threshold": 0.20,
+    }
+    mgr = TouManager(hass)
+
+    timeline = await mgr.async_build_timeline({**base, "tou_tier_source": "period"})
+    assert timeline is not None and timeline.current_tier == TOU_TIER_PEAK
+    assert timeline.current_rate == 0.22  # the rate still feeds the sensors
+
+    timeline = await mgr.async_build_timeline({**base, "tou_tier_source": "flags"})
+    assert timeline is not None and timeline.current_tier == TOU_TIER_OFF
+
+    timeline = await mgr.async_build_timeline({**base, "tou_tier_source": "rate"})
+    assert timeline is not None and timeline.current_tier == TOU_TIER_PEAK
+
+    # auto (never touched): the legacy cascade — period wins.
+    timeline = await mgr.async_build_timeline(base)
+    assert timeline is not None and timeline.current_tier == TOU_TIER_PEAK
+
+
+@pytest.mark.asyncio
+async def test_tier_source_mode_has_no_fallback() -> None:
+    """Explicit modes do not cascade: an unavailable period sensor stays unknown."""
+    hass = _make_hass({"sensor.period": "unavailable", "sensor.rate": "0.22"})
+    mgr = TouManager(hass)
+    timeline = await mgr.async_build_timeline(
+        {
+            "tou_enabled": True,
+            "tou_tier_source": "period",
+            "tou_period_entity": "sensor.period",
+            "tou_rate_entity": "sensor.rate",
+            "tou_peak_threshold": 0.20,
+        }
+    )
+    assert timeline is not None and timeline.current_tier == TOU_TIER_UNKNOWN
+    assert timeline.current_rate == 0.22
+
+
+@pytest.mark.asyncio
+async def test_lookahead_mode_selects_the_future_source() -> None:
+    """Calendar / next-change / none decide what RoomMind sees ahead."""
+    from homeassistant.util import dt as dt_util
+
+    now = time.time()
+    cal_iso_start = dt_util.utc_from_timestamp(now + 1 * 3600.0).isoformat()
+    cal_iso_end = dt_util.utc_from_timestamp(now + 4 * 3600.0).isoformat()
+    nx_iso = dt_util.utc_from_timestamp(now + 2 * 3600.0).isoformat()
+    hass = _make_hass({"sensor.period": "ulo_off_peak", "sensor.nx": nx_iso, "calendar.c": "on"})
+    hass.services.async_call = AsyncMock(
+        return_value={
+            "calendar.c": {"events": [{"start": {"date_time": cal_iso_start}, "end": {"date_time": cal_iso_end}}]}
+        }
+    )
+    mgr = TouManager(hass)
+    base: dict = {
+        "tou_enabled": True,
+        "tou_period_entity": "sensor.period",
+        "tou_calendar_entities": [{"entity_id": "calendar.c", "tier": "peak"}],
+        "tou_next_change_entity": "sensor.nx",
+        "tou_next_change_tier": "mid",
+    }
+
+    # auto: calendars cover the horizon window and win over next-change.
+    timeline = await mgr.async_build_timeline(base)
+    assert timeline is not None and timeline.tier_at(now + 2 * 3600.0) == TOU_TIER_PEAK
+
+    # next_change: calendars ignored, the mid step lands at +2h.
+    timeline = await mgr.async_build_timeline({**base, "tou_lookahead": "next_change"})
+    assert timeline is not None
+    assert timeline.tier_at(now + 1) == TOU_TIER_OFF
+    assert timeline.tier_at(now + 2 * 3600.0 + 30) == TOU_TIER_MID
+
+    # calendar: the next-change sensor is ignored.
+    timeline = await mgr.async_build_timeline({**base, "tou_lookahead": "calendar"})
+    assert timeline is not None and timeline.tier_at(now + 2 * 3600.0 + 30) == TOU_TIER_PEAK
+
+    # none: flat current tier regardless of bindings.
+    timeline = await mgr.async_build_timeline({**base, "tou_lookahead": "none"})
+    assert timeline is not None
+    assert len(timeline.segments) == 1
+    assert timeline.tier_at(now + 2 * 3600.0) == TOU_TIER_OFF
+
+
+@pytest.mark.asyncio
 async def test_calendar_service_failure_is_graceful() -> None:
     hass = _make_hass({"sensor.rate_period": "ulo_on_peak"})
     hass.services.async_call = AsyncMock(side_effect=RuntimeError("boom"))
@@ -644,7 +741,8 @@ async def test_next_change_guards() -> None:
     )
     assert timeline is not None and len(timeline.segments) == 1
 
-    # A valid timestamp but an unknown tier name: the tier defaults to peak.
+    # A valid timestamp with an unknown tier name: no guessing — the
+    # lookahead stays off entirely (same as "Not set").
     future = time.time() + 3600.0
     from homeassistant.util import dt as dt_util
 
@@ -662,8 +760,19 @@ async def test_next_change_guards() -> None:
             "tou_next_change_tier": "bogus",
         }
     )
-    assert timeline is not None
-    assert timeline.tier_at(future + 30) == TOU_TIER_PEAK
+    assert timeline is not None and len(timeline.segments) == 1
+    assert timeline.tier_at(future + 30) == TOU_TIER_OFF
+
+    timeline = await mgr.async_build_timeline(
+        {
+            "tou_enabled": True,
+            "tou_period_entity": "sensor.period",
+            "tou_next_change_entity": "sensor.nx3",
+            "tou_next_change_tier": "",
+        }
+    )
+    assert timeline is not None and len(timeline.segments) == 1
+    assert timeline.tier_at(future + 30) == TOU_TIER_OFF
 
 
 def _state(value: str) -> MagicMock:

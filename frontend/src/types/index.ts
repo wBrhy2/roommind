@@ -106,6 +106,13 @@ export type TouTier = "peak" | "mid" | "off" | "ultra_low";
 /** Per-room participation in tariff-aware control. */
 export type TouMode = "off" | "setback" | "setback_boost";
 
+/** Which source class answers the current tier ("auto" = legacy cascade). */
+export type TouTierSource = "auto" | "period" | "rate" | "flags";
+
+/** Which source provides the future-tier timeline ("auto" = calendars, then
+ * next-change; "none" = shape only, no pre-conditioning/coasting planning). */
+export type TouLookahead = "auto" | "calendar" | "next_change" | "none";
+
 /** How a coast window ends after its triggering tier change. */
 export type TouCoastEndMode = "duration" | "clock" | "tier_window";
 
@@ -255,10 +262,13 @@ export interface GlobalSettings {
   compressor_groups?: CompressorGroup[];
   /** Time-of-Use tariff awareness (managers/tou_manager.py). */
   tou_enabled?: boolean;
+  tou_tier_source?: TouTierSource;
+  tou_lookahead?: TouLookahead;
   tou_rate_entity?: string;
   tou_period_entity?: string;
   tou_next_change_entity?: string;
-  tou_next_change_tier?: TouTier;
+  /** "" = no lookahead (the next-change step is disabled). */
+  tou_next_change_tier?: TouTier | "";
   tou_calendar_entities?: TouCalendarBinding[];
   tou_flag_entities?: Partial<Record<TouTier, string>>;
   tou_price_weighting?: boolean;

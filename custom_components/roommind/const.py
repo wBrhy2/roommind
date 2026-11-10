@@ -261,6 +261,13 @@ TOU_MODE_SETBACK = "setback"
 TOU_MODE_SETBACK_BOOST = "setback_boost"
 TOU_MODES = [TOU_MODE_OFF, TOU_MODE_SETBACK, TOU_MODE_SETBACK_BOOST]
 
+# Which entity class the panel treats as THE source for the current tier and
+# for future-tier lookahead. "auto" = legacy cascade (period -> flags -> rate;
+# calendars -> next-change) so existing installs are unchanged until the user
+# picks a mode explicitly.
+TOU_TIER_SOURCES = ["auto", "period", "rate", "flags"]
+TOU_LOOKAHEADS = ["auto", "calendar", "next_change", "none"]
+
 # Coast-rule end modes and post-hold behavior.
 TOU_END_MODES = ["duration", "clock", "tier_window"]
 TOU_POST_HOLD_MODES = ["stay", "schedule"]

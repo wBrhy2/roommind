@@ -76,6 +76,8 @@ export class RsSettings extends LitElement {
   @state() private _moldPreventionNotify = false;
   @state() private _compressorGroups: CompressorGroup[] = [];
   @state() private _touEnabled = false;
+  @state() private _touTierSource = "auto";
+  @state() private _touLookahead = "auto";
   @state() private _touRateEntity = "";
   @state() private _touPeriodEntity = "";
   @state() private _touNextChangeEntity = "";
@@ -161,6 +163,8 @@ export class RsSettings extends LitElement {
       this._moldPreventionNotify = s.mold_prevention_notify_enabled ?? false;
       this._compressorGroups = s.compressor_groups ?? [];
       this._touEnabled = s.tou_enabled ?? false;
+      this._touTierSource = s.tou_tier_source ?? "auto";
+      this._touLookahead = s.tou_lookahead ?? "auto";
       this._touRateEntity = s.tou_rate_entity ?? "";
       this._touPeriodEntity = s.tou_period_entity ?? "";
       this._touNextChangeEntity = s.tou_next_change_entity ?? "";
@@ -344,6 +348,8 @@ export class RsSettings extends LitElement {
         <rs-settings-tou
           .hass=${this.hass}
           .touEnabled=${this._touEnabled}
+          .touTierSource=${this._touTierSource}
+          .touLookahead=${this._touLookahead}
           .touRateEntity=${this._touRateEntity}
           .touPeriodEntity=${this._touPeriodEntity}
           .touNextChangeEntity=${this._touNextChangeEntity}
@@ -545,6 +551,8 @@ export class RsSettings extends LitElement {
           ? this._moldNotificationTargets.filter((t) => t.entity_id)
           : [],
         tou_enabled: this._touEnabled,
+        tou_tier_source: this._touTierSource,
+        tou_lookahead: this._touLookahead,
         tou_rate_entity: this._touRateEntity,
         tou_period_entity: this._touPeriodEntity,
         tou_next_change_entity: this._touNextChangeEntity,

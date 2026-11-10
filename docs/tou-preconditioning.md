@@ -7,35 +7,73 @@ coasted on stored heat instead of bought energy.
 
 ## Setting up a tariff source
 
-Open `Settings -> Time-of-Use control` and enable the feature, then bind at
-least one source. RoomMind reads whatever you link and auto-detects the kind:
+Open `Settings -> Time-of-Use control` and enable the feature. The panel then
+asks two questions, one source per answer — anything you bind but do not
+select is kept in settings, just ignored:
 
-- **Cost sensor** — a numeric price entity (e.g.
-  `sensor.hydro_one_networks_inc_ar_residential_electricity_rate`, Tibber,
-  Nord Pool, an `input_number`). Give it **Cost thresholds** (peak from,
-  mid-peak from, ultra-low up to) so rates map onto tiers.
-- **Period sensor** — an entity whose state names the active tier. Words like
-  `on-peak`, `mid-peak`, `off-peak`, `overnight`/`ultra`/`super-off` are
-  recognized (Hydro One's `…_active_peak` states such as `ulo_on_peak` map
-  automatically).
-- **Next change sensor** — a timestamp entity (e.g.
-  `…_next_peak_starts`) marking the next tier boundary; pair it with the
-  **Tier after the next change** selector.
-- **Tariff calendars** — bind up to four `calendar.*` entities, one per tier.
-  Their events give RoomMind the *entire future tariff timeline*: exact peak
-  windows in both directions, which is what coasting and pre-conditioning
-  plans against. This is the richest source and works with the built-in
-  **Local Calendar** integration — no automations required.
+**1. Where the current tier comes from:**
+
+- **Cost sensor** — pick this when you have a numeric price but no period
+  text (Tibber, Nord Pool, spot rates). A numeric price entity (e.g.
+  `sensor.hydro_one_networks_inc_ar_residential_electricity_rate` or an
+  `input_number`) plus **Cost thresholds** (peak from, mid-peak from,
+  ultra-low up to) map rates onto tiers.
+- **Period sensor** — pick this when an integration names the active tier.
+  Words like `on-peak`, `mid-peak`, `off-peak`, `overnight`/`ultra`/`super-off`
+  are recognized (Hydro One's `…_active_peak` states such as `ulo_on_peak`
+  map automatically).
 - **Period flags** — fallback for setups where automations toggle one
-  `input_boolean`/`binary_sensor` per tier. Flags carry no future information,
-  so calendar or next-change bindings are still needed for coasting to see
-  past the current tier.
+  `input_boolean`/`binary_sensor` per tier.
 
-When nothing resolves (sensor deleted, unavailable, no thresholds), the tier is
-unknown and RoomMind behaves exactly as before: no shaping, no coasting.
+**2. How far RoomMind can see into the future** (this is what enables
+pre-conditioning and coast rules — with no future view, only tier shaping of
+the currently active tier applies):
+
+- **Tariff calendars** (recommended) — bind up to four `calendar.*` entities,
+  one per tier. Their events give RoomMind the *entire future tariff
+  timeline*: exact peak windows in both directions, which is what coasting
+  and pre-conditioning plan against. Works with the built-in **Local
+  Calendar** integration — no automations required.
+- **Next change sensor** — for integrations that only publish a timestamp
+  for the next tier boundary (e.g. Hydro One's `…_next_peak_starts`).
+  RoomMind sees *one step* ahead: the sensor gives the when, the **Tier
+  after the next change** selector gives the what — the change leads into
+  that tier, and everything after it stays there. That combination is
+  exactly right for a "next *peak* starts" sensor (pick Peak), which always
+  changes into peak; pick **Not set** to disable the lookahead again. A
+  generic "next change" timestamp that alternates between tiers cannot be
+  pinned this way — use calendars instead.
+- **No future view** — shaping only.
+
+When nothing resolves (sensor deleted, unavailable, no thresholds), the tier
+is unknown and RoomMind behaves exactly as before: no shaping, no coasting.
 
 Manual overrides, vacation and all safety limits keep priority: a boost you
 started is never shaved by a tariff, and vacation setback is never boosted.
+
+### Helpers as an escape hatch
+
+If your tariff source is unreliable — the integration's entity goes
+`unavailable`, uses wording RoomMind cannot map, or a calendar misbehaves —
+bind Home Assistant **helpers** instead and let an automation keep them
+current:
+
+- `input_number` for the cost sensor, `input_select` or a text-state sensor
+  for the period, `input_boolean`/`binary_sensor` for flags, and
+  `input_datetime` (**Date & time** type) for the next-change timestamp.
+  RoomMind reads helpers exactly like real sensors; an unparseable or stale
+  value simply degrades to "no shaping / no lookahead", never to wrong
+  behaviour.
+- **Microgrid / multi-fuel setups**: the tiers are only labels for *expensive
+  now* versus *cheap later*. If your effective energy cost follows something
+  other than a utility timetable — the genset just started, the battery is
+  full, you are islanded with wind blowing — an automation that watches the
+  dispatch situation can publish the effective tier, price and expected
+  window end into helpers, and RoomMind will shape, pre-charge and coast
+  against that as if it were the utility tariff. The "Tier after the next
+  change" selector then simply states which dispatch state your automation
+  flips to next. Pre-condition quality depends on your automation's
+  boundary predictions being right; nothing else in the chain changes.
 
 ## Room participation
 
@@ -55,7 +93,13 @@ pre-charge warm an empty room (your loft scenario: charge at 02:00 so the
 
 Tier shaping defaults (peak heating/cooling limits, mid setback, boost step,
 clamp band) live in the settings and match the familiar Ontario numbers
-directly: peak 18 °C heating floor / 28 °C cooling ceiling, mid ±2 °C.
+directly: peak 18 °C heating floor / 28 °C cooling ceiling, mid ±2 °C. These
+are bounds on the room's **indoor target temperature** — during a peak the
+heating setpoint never rises above 18 °C and the cooling setpoint never drops
+below 28 °C. They are not device-output limits, and they are separate from
+the global *Maximum outdoor temp for heating* / *Minimum outdoor temp for
+cooling* gates under Control, which block conditioning by outdoor weather
+regardless of tier.
 
 ## Price-weighted planning
 

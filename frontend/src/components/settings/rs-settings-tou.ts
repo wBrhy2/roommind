@@ -2,13 +2,33 @@
  * rs-settings-tou – Time-of-Use tariff awareness: source bindings, tier
  * shaping defaults, and coast rules (multi-room, compressor-group style).
  *
+ * The tariff source is structured as two exclusive choices so the panel only
+ * shows the fields the selected source actually needs:
+ *
+ * * "Current tier from" — period sensor, cost sensor (+ thresholds) or flags;
+ *   mirrors the manager cascade. Selecting a radio writes an explicit
+ *   ``tou_tier_source``; "auto" (never touched) derives from what is bound.
+ * * "Plan the tariff future from" — calendars, next-change sensor, or none;
+ *   drives whether pre-conditioning/coast rules can see beyond the current
+ *   tier (``tou_lookahead``).
+ *
+ * Bound-but-unselected sources stay in settings (ignored by the manager).
+ * Shaping defaults live behind the "fine-tune" disclosure.
+ *
  * Temperatures edit in HA display units and persist as °C, like the room
  * comfort/eco fields (see utils/temperature.ts).
  */
 import { LitElement, html, css, nothing } from "lit";
-import { customElement, property } from "lit/decorators.js";
-import type { HomeAssistant, TouCalendarBinding, TouCoastRule, TouTier } from "../../types";
-import { localize } from "../../utils/localize";
+import { customElement, property, state } from "lit/decorators.js";
+import type {
+  HomeAssistant,
+  TouCalendarBinding,
+  TouCoastRule,
+  TouLookahead,
+  TouTier,
+  TouTierSource,
+} from "../../types";
+import { localize, type TranslationKey } from "../../utils/localize";
 import { getSelectValue } from "../../utils/events";
 import {
   tempRange,
@@ -26,15 +46,19 @@ import { inputStyles } from "../../styles/input-styles";
 const TOU_TIERS: TouTier[] = ["peak", "mid", "off", "ultra_low"];
 const ANY_TIER = "__any";
 const END_MODES = ["duration", "clock", "tier_window"] as const;
+const CLOSE_ICON =
+  "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z";
 
 @customElement("rs-settings-tou")
 export class RsSettingsTou extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ type: Boolean }) public touEnabled = false;
+  @property({ type: String }) public touTierSource: TouTierSource = "auto";
+  @property({ type: String }) public touLookahead: TouLookahead = "auto";
   @property({ type: String }) public touRateEntity = "";
   @property({ type: String }) public touPeriodEntity = "";
   @property({ type: String }) public touNextChangeEntity = "";
-  @property({ type: String }) public touNextChangeTier = "peak";
+  @property({ type: String }) public touNextChangeTier: TouTier | "" = "peak";
   @property({ type: Array }) public touCalendarEntities: TouCalendarBinding[] = [];
   @property({ attribute: false }) public touFlagEntities: Record<string, string> = {};
   @property({ type: Boolean }) public touPriceWeighting = true;
@@ -49,6 +73,8 @@ export class RsSettingsTou extends LitElement {
   @property({ type: Array }) public touCoastRules: TouCoastRule[] = [];
   /** area_id -> display name, for the rule room checkboxes. */
   @property({ attribute: false }) public roomAreas: Record<string, string> = {};
+
+  @state() private _fineTuneOpen = false;
 
   static styles = [
     inputStyles,
@@ -79,6 +105,71 @@ export class RsSettingsTou extends LitElement {
         font-size: 14px;
         font-weight: 500;
         margin: 16px 0 4px;
+      }
+      .radio-option {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 8px 0;
+        cursor: pointer;
+      }
+      .radio-option input {
+        margin-top: 3px;
+        flex-shrink: 0;
+        accent-color: var(--accent-color);
+      }
+      .radio-text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .radio-title {
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .radio-desc {
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        line-height: 1.5;
+      }
+      .mode-fields {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin: 4px 0 8px 26px;
+      }
+      .mode-fields ha-entity-picker,
+      .mode-fields ha-select {
+        width: 100%;
+      }
+      .picker-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .picker-row ha-entity-picker {
+        flex: 1;
+        min-width: 0;
+      }
+      .fine-tune-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin-top: 16px;
+        padding: 8px 0;
+        cursor: pointer;
+      }
+      .fine-tune-row ha-icon {
+        margin-top: 2px;
+        color: var(--secondary-text-color);
+      }
+      .fine-tune-label {
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .fine-tune-row .hint {
+        margin-bottom: 0;
       }
       .rule-card {
         border: 1px solid var(--divider-color);
@@ -119,8 +210,26 @@ export class RsSettingsTou extends LitElement {
     `,
   ];
 
+  /** The tier source the panel shows: explicit choice, else what is bound. */
+  private _tierMode(): Exclude<TouTierSource, "auto"> {
+    if (this.touTierSource !== "auto") return this.touTierSource;
+    if (this.touPeriodEntity) return "period";
+    if (Object.values(this.touFlagEntities || {}).some((v) => v)) return "flags";
+    return "rate";
+  }
+
+  /** The lookahead source the panel shows: explicit choice, else what is bound. */
+  private _lookaheadMode(): Exclude<TouLookahead, "auto"> {
+    if (this.touLookahead !== "auto") return this.touLookahead;
+    if (this.touCalendarEntities.some((c) => c.entity_id)) return "calendar";
+    if (this.touNextChangeEntity) return "next_change";
+    return "none";
+  }
+
   render() {
     const l = this.hass.language;
+    const tier = this._tierMode();
+    const look = this._lookaheadMode();
     return html`
       <rs-toggle-row
         .label=${localize("tou.enabled", l)}
@@ -133,124 +242,283 @@ export class RsSettingsTou extends LitElement {
           ? html`
               <div class="section-label">${localize("tou.source", l)}</div>
               <div class="hint">${localize("tou.source_hint", l)}</div>
-              <div class="tier-grid">
-                <ha-entity-picker
-                  .hass=${this.hass}
-                  .value=${this.touRateEntity}
-                  .includeDomains=${["sensor", "input_number"]}
-                  .label=${localize("tou.rate_entity", l)}
-                  @value-changed=${(e: CustomEvent) =>
-                    this._fire("touRateEntity", (e.detail?.value as string) ?? "")}
-                ></ha-entity-picker>
-                <ha-entity-picker
-                  .hass=${this.hass}
-                  .value=${this.touPeriodEntity}
-                  .includeDomains=${["sensor", "input_select"]}
-                  .label=${localize("tou.period_entity", l)}
-                  @value-changed=${(e: CustomEvent) =>
-                    this._fire("touPeriodEntity", (e.detail?.value as string) ?? "")}
-                ></ha-entity-picker>
-                <ha-entity-picker
-                  .hass=${this.hass}
-                  .value=${this.touNextChangeEntity}
-                  .includeDomains=${["sensor", "input_datetime"]}
-                  .label=${localize("tou.next_change_entity", l)}
-                  @value-changed=${(e: CustomEvent) =>
-                    this._fire("touNextChangeEntity", (e.detail?.value as string) ?? "")}
-                ></ha-entity-picker>
-                ${this._tierSelect(
-                  localize("tou.next_change_tier", l),
-                  this.touNextChangeTier,
-                  TOU_TIERS,
-                  (v) => this._fire("touNextChangeTier", v),
-                )}
+
+              <div class="section-label">${localize("tou.tier_from", l)}</div>
+              ${this._radioOption(
+                "tou_src",
+                "tou.src.rate",
+                "tou.src.rate_desc",
+                "rate",
+                tier,
+                (v) => this._fire("touTierSource", v),
+              )}
+              ${this._radioOption(
+                "tou_src",
+                "tou.src.period",
+                "tou.src.period_desc",
+                "period",
+                tier,
+                (v) => this._fire("touTierSource", v),
+              )}
+              ${this._radioOption(
+                "tou_src",
+                "tou.src.flags",
+                "tou.src.flags_desc",
+                "flags",
+                tier,
+                (v) => this._fire("touTierSource", v),
+              )}
+              <div class="mode-fields">
+                ${
+                  tier === "period"
+                    ? html`<ha-entity-picker
+                          .hass=${this.hass}
+                          .value=${this.touPeriodEntity}
+                          .includeDomains=${["sensor", "input_select"]}
+                          .label=${localize("tou.period_entity", l)}
+                          @value-changed=${(e: CustomEvent) =>
+                            this._fire("touPeriodEntity", (e.detail?.value as string) ?? "")}
+                        ></ha-entity-picker>
+                        ${this._rateAuxPicker()}`
+                    : nothing
+                }
+                ${
+                  tier === "rate"
+                    ? html`<ha-entity-picker
+                          .hass=${this.hass}
+                          .value=${this.touRateEntity}
+                          .includeDomains=${["sensor", "input_number"]}
+                          .label=${localize("tou.rate_entity", l)}
+                          @value-changed=${(e: CustomEvent) =>
+                            this._fire("touRateEntity", (e.detail?.value as string) ?? "")}
+                        ></ha-entity-picker>
+                        <div class="section-label">${localize("tou.thresholds", l)}</div>
+                        <div class="hint">${localize("tou.thresholds_hint", l)}</div>
+                        <div class="tier-grid">
+                          ${this._optionalNumberField("tou_peak_threshold", localize("tou.peak_threshold", l))}
+                          ${this._optionalNumberField("tou_mid_threshold", localize("tou.mid_threshold", l))}
+                          ${this._optionalNumberField("tou_ultra_threshold", localize("tou.ultra_threshold", l))}
+                        </div>`
+                    : nothing
+                }
+                ${
+                  tier === "flags"
+                    ? html`<div class="hint">${localize("tou.flags_hint", l)}</div>
+                        <div class="tier-grid">
+                          ${TOU_TIERS.map(
+                            (t) =>
+                              html`<ha-entity-picker
+                                .hass=${this.hass}
+                                .value=${this.touFlagEntities[t] ?? ""}
+                                .includeDomains=${["input_boolean", "binary_sensor"]}
+                                .label=${localize(`tou.tier.${t}`, l)}
+                                @value-changed=${(e: CustomEvent) => {
+                                  const updated = {
+                                    ...this.touFlagEntities,
+                                    [t]: (e.detail?.value as string) ?? "",
+                                  };
+                                  this._fire("touFlagEntities", updated);
+                                }}
+                              ></ha-entity-picker>`,
+                          )}
+                        </div>
+                        ${this._rateAuxPicker()}`
+                    : nothing
+                }
               </div>
 
-              <div class="section-label">${localize("tou.calendars", l)}</div>
-              <div class="hint">${localize("tou.calendars_hint", l)}</div>
-              ${this.touCalendarEntities.map((c, idx) => this._renderCalendarRow(c, idx))}
+              <div class="section-label">${localize("tou.future_from", l)}</div>
+              ${this._radioOption(
+                "tou_look",
+                "tou.lk.calendar",
+                "tou.lk.calendar_desc",
+                "calendar",
+                look,
+                (v) => this._fire("touLookahead", v),
+              )}
+              ${this._radioOption(
+                "tou_look",
+                "tou.lk.next_change",
+                "tou.lk.next_change_desc",
+                "next_change",
+                look,
+                (v) => this._fire("touLookahead", v),
+              )}
+              ${this._radioOption(
+                "tou_look",
+                "tou.lk.none",
+                "tou.lk.none_desc",
+                "none",
+                look,
+                (v) => this._fire("touLookahead", v),
+              )}
+              <div class="mode-fields">
+                ${
+                  look === "calendar"
+                    ? html`${this.touCalendarEntities.map((c, idx) => this._renderCalendarRow(c, idx))}
+                      ${
+                        this.touCalendarEntities.length < 4
+                          ? html`<ha-button class="add-button" @click=${this._addCalendar}>
+                              <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
+                              ${localize("tou.add_calendar", l)}
+                            </ha-button>`
+                          : nothing
+                      }`
+                    : nothing
+                }
+                ${
+                  look === "next_change"
+                    ? html`<div class="picker-row">
+                          <ha-entity-picker
+                            .hass=${this.hass}
+                            .value=${this.touNextChangeEntity}
+                            .includeDomains=${["sensor", "input_datetime"]}
+                            .label=${localize("tou.next_change_entity", l)}
+                            @value-changed=${(e: CustomEvent) =>
+                              this._fire("touNextChangeEntity", (e.detail?.value as string) ?? "")}
+                          ></ha-entity-picker>
+                          ${
+                            this.touNextChangeEntity
+                              ? html`<ha-icon-button
+                                  .path=${CLOSE_ICON}
+                                  .label=${localize("tou.clear", l)}
+                                  @click=${() => this._fire("touNextChangeEntity", "")}
+                                ></ha-icon-button>`
+                              : nothing
+                          }
+                        </div>
+                        ${this._renderNextTierSelect()}
+                        <div class="hint">${localize("tou.next_change_tier_hint", l)}</div>`
+                    : nothing
+                }
+              </div>
+
               ${
-                this.touCalendarEntities.length < 4
-                  ? html`<ha-button class="add-button" @click=${this._addCalendar}>
-                      <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
-                      ${localize("tou.add_calendar", l)}
-                    </ha-button>`
+                look !== "none" || this.touCoastRules.length > 0
+                  ? html`
+                      <div class="section-label">${localize("tou.coast_title", l)}</div>
+                      <div class="hint">${localize("tou.coast_intro", l)}</div>
+                      ${
+                        this.touCoastRules.length === 0
+                          ? html`<div class="no-rules">${localize("tou.no_rules", l)}</div>`
+                          : this.touCoastRules.map((rule, idx) => this._renderRule(rule, idx))
+                      }
+                      <ha-button class="add-button" @click=${this._addRule}>
+                        <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
+                        ${localize("tou.add_rule", l)}
+                      </ha-button>
+                    `
                   : nothing
               }
 
-              <div class="section-label">${localize("tou.flags", l)}</div>
-              <div class="hint">${localize("tou.flags_hint", l)}</div>
-              <div class="tier-grid">
-                ${TOU_TIERS.map(
-                  (t) =>
-                    html`<ha-entity-picker
-                      .hass=${this.hass}
-                      .value=${this.touFlagEntities[t] ?? ""}
-                      .includeDomains=${["input_boolean", "binary_sensor"]}
-                      .label=${localize(`tou.tier.${t}`, l)}
-                      @value-changed=${(e: CustomEvent) => {
-                        const updated = {
-                          ...this.touFlagEntities,
-                          [t]: (e.detail?.value as string) ?? "",
-                        };
-                        this._fire("touFlagEntities", updated);
-                      }}
-                    ></ha-entity-picker>`,
-                )}
+              <div class="fine-tune-row" @click=${() => (this._fineTuneOpen = !this._fineTuneOpen)}>
+                <ha-icon
+                  icon=${this._fineTuneOpen ? "mdi:chevron-down" : "mdi:chevron-right"}
+                ></ha-icon>
+                <div>
+                  <div class="fine-tune-label">${localize("tou.fine_tune", l)}</div>
+                  <div class="hint">${localize("tou.fine_tune_hint", l)}</div>
+                </div>
               </div>
-
-              <div class="section-label">${localize("tou.shaping", l)}</div>
-              <div class="hint">${localize("tou.shaping_hint", l)}</div>
-              <div class="tier-grid">
-                ${this._tempField("touPeakHeatFloor", localize("tou.peak_heat_floor", l), this.touPeakHeatFloor, 5, 35)}
-                ${this._tempField("touPeakCoolCeiling", localize("tou.peak_cool_ceiling", l), this.touPeakCoolCeiling, 5, 40)}
-                ${this._deltaField("touMidSetbackDelta", localize("tou.mid_delta", l), this.touMidSetbackDelta, 0, 5)}
-                ${this._deltaField("touBoostDelta", localize("tou.boost_delta", l), this.touBoostDelta, 0, 5)}
-                ${this._tempField("touClampMin", localize("tou.clamp_min", l), this.touClampMin, 5, 30)}
-                ${this._tempField("touClampMax", localize("tou.clamp_max", l), this.touClampMax, 10, 40)}
-              </div>
-              <rs-toggle-row
-                .label=${localize("tou.price_weighting", l)}
-                .hint=${localize("tou.price_weighting_hint", l)}
-                .checked=${this.touPriceWeighting}
-                @toggle-changed=${(e: CustomEvent) =>
-                  this._fire("touPriceWeighting", e.detail as boolean)}
-              ></rs-toggle-row>
-
-              <div class="section-label">${localize("tou.thresholds", l)}</div>
-              <div class="hint">${localize("tou.thresholds_hint", l)}</div>
-              <div class="tier-grid">
-                ${this._optionalNumberField("tou_peak_threshold", localize("tou.peak_threshold", l))}
-                ${this._optionalNumberField("tou_mid_threshold", localize("tou.mid_threshold", l))}
-                ${this._optionalNumberField("tou_ultra_threshold", localize("tou.ultra_threshold", l))}
-              </div>
-
-              <div class="section-label">${localize("tou.coast_title", l)}</div>
-              <div class="hint">${localize("tou.coast_intro", l)}</div>
               ${
-                this.touCoastRules.length === 0
-                  ? html`<div class="no-rules">${localize("tou.no_rules", l)}</div>`
-                  : this.touCoastRules.map((rule, idx) => this._renderRule(rule, idx))
+                this._fineTuneOpen
+                  ? html`
+                      <div class="section-label">${localize("tou.shaping", l)}</div>
+                      <div class="hint">${localize("tou.shaping_hint", l)}</div>
+                      <div class="tier-grid">
+                        ${this._tempField(
+                          "touPeakHeatFloor",
+                          localize("tou.peak_heat_floor", l),
+                          this.touPeakHeatFloor,
+                          5,
+                          35,
+                        )}
+                        ${this._tempField(
+                          "touPeakCoolCeiling",
+                          localize("tou.peak_cool_ceiling", l),
+                          this.touPeakCoolCeiling,
+                          5,
+                          40,
+                        )}
+                        ${this._deltaField(
+                          "touMidSetbackDelta",
+                          localize("tou.mid_delta", l),
+                          this.touMidSetbackDelta,
+                          0,
+                          5,
+                        )}
+                        ${this._deltaField("touBoostDelta", localize("tou.boost_delta", l), this.touBoostDelta, 0, 5)}
+                        ${this._tempField("touClampMin", localize("tou.clamp_min", l), this.touClampMin, 5, 30)}
+                        ${this._tempField("touClampMax", localize("tou.clamp_max", l), this.touClampMax, 10, 40)}
+                      </div>
+                      <rs-toggle-row
+                        .label=${localize("tou.price_weighting", l)}
+                        .hint=${localize("tou.price_weighting_hint", l)}
+                        .checked=${this.touPriceWeighting}
+                        @toggle-changed=${(e: CustomEvent) => this._fire("touPriceWeighting", e.detail as boolean)}
+                      ></rs-toggle-row>
+                    `
+                  : nothing
               }
-              <ha-button class="add-button" @click=${this._addRule}>
-                <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
-                ${localize("tou.add_rule", l)}
-              </ha-button>
             `
           : nothing
       }
     `;
   }
 
-  private _tierSelect(label: string, value: string, tiers: TouTier[], onPick: (v: string) => void) {
+  private _radioOption(
+    group: string,
+    titleKey: TranslationKey,
+    descKey: TranslationKey,
+    value: string,
+    selected: string,
+    onSelect: (v: string) => void,
+  ) {
+    const l = this.hass.language;
+    return html`<label class="radio-option">
+      <input
+        type="radio"
+        name=${group}
+        .checked=${selected === value}
+        @change=${() => onSelect(value)}
+      />
+      <span class="radio-text">
+        <span class="radio-title">${localize(titleKey, l)}</span>
+        <span class="radio-desc">${localize(descKey, l)}</span>
+      </span>
+    </label>`;
+  }
+
+  /** Cost sensor shown as auxiliary input in period/flags modes: it still
+   * feeds the rate sensors and price-weighted planning without deciding the
+   * tier there. */
+  private _rateAuxPicker() {
+    const l = this.hass.language;
+    return html`<div>
+      <ha-entity-picker
+        .hass=${this.hass}
+        .value=${this.touRateEntity}
+        .includeDomains=${["sensor", "input_number"]}
+        .label=${localize("tou.rate_entity", l)}
+        @value-changed=${(e: CustomEvent) => this._fire("touRateEntity", (e.detail?.value as string) ?? "")}
+      ></ha-entity-picker>
+      <div class="hint">${localize("tou.rate_aux_hint", l)}</div>
+    </div>`;
+  }
+
+  /** Next-change tier select; "Not set" ("" ) disables the lookahead step. */
+  private _renderNextTierSelect() {
     const l = this.hass.language;
     return html`<ha-select
-      .label=${label}
-      .value=${value}
-      .options=${tiers.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) }))}
+      .label=${localize("tou.next_change_tier", l)}
+      .value=${this.touNextChangeTier || ANY_TIER}
+      .options=${[
+        { value: ANY_TIER, label: localize("tou.not_set", l) },
+        ...TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) })),
+      ]}
       @selected=${(e: Event) => {
         const v = getSelectValue(e);
-        if (v) onPick(v);
+        if (v) this._fire("touNextChangeTier", v === ANY_TIER ? "" : v);
       }}
       @closed=${(e: Event) => e.stopPropagation()}
       fixedMenuPosition
@@ -331,7 +599,7 @@ export class RsSettingsTou extends LitElement {
           fixedMenuPosition
         ></ha-select>
         <ha-icon-button
-          .path=${"M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z"}
+          .path=${CLOSE_ICON}
           @click=${() =>
             this._fire(
               "touCalendarEntities",
