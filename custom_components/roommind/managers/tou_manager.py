@@ -86,6 +86,137 @@ def normalize_period_state(state: str) -> str:
     return TOU_TIER_UNKNOWN
 
 
+def _hhmm_to_minutes(raw: Any) -> int | None:
+    parts = str(raw or "").split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour * 60 + minute
+
+
+def _value_candidate(value: Any, plain: float) -> float | None:
+    """Resolve a record/block value against the plain schedule target."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        if str(value.get("mode") or "set") == "shift":
+            delta = abs(float(value.get("delta")))  # type: ignore[arg-type]
+            if str(value.get("direction") or "raise") == "lower":
+                delta = -delta
+            return plain + delta
+        return float(value.get("temp"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _active_window(windows: list[dict[str, Any]], ts: float) -> dict[str, Any] | None:
+    found: dict[str, Any] | None = None
+    for w in windows:
+        if w["start"] <= ts < w["end"]:
+            found = w  # list order = priority: the later record wins
+    return found
+
+
+def _heat_guarded(cand: float, shaped: float, plain: float, mold_active: bool, vacation_now: bool) -> bool:
+    """True when a heating-side candidate must be rejected (safety wins)."""
+    return (mold_active and cand < shaped) or (vacation_now and cand > plain)
+
+
+def _apply_tariff_windows(
+    windows: list[dict[str, Any]],
+    ts: float,
+    plain: float | None,
+    shaped: float,
+    clamp_min: float,
+    clamp_max: float,
+    mold_active: bool,
+    vacation_now: bool,
+    is_heat: bool,
+) -> float | None:
+    """Tariff schedule records replace tier shaping on their side (chain step 4)."""
+    if plain is None:
+        return None  # off stays off: no tariff record activates a side
+    active = _active_window(windows, ts)
+    if active is None:
+        return shaped
+    rec = active["rec"]
+    cand = _value_candidate(rec.get("value"), plain)
+    if cand is None:
+        return shaped
+    if rec.get("guard"):
+        # Migrated legacy coast: one-way drift versus the schedule, shaping
+        # bypassed — exactly the old coast-window semantics.
+        if is_heat:
+            return cand if cand < plain else plain
+        return cand if cand > plain else plain
+    cand = min(max(cand, clamp_min), clamp_max)
+    if is_heat and _heat_guarded(cand, shaped, plain, mold_active, vacation_now):
+        return shaped
+    return cand
+
+
+def _block_active(block: Any, side: str, ts: float, occupied: bool) -> bool:
+    """User schedule block: side match, presence gate, weekday and clock window."""
+    if not isinstance(block, dict) or not block.get("enabled", True):
+        return False
+    if str(block.get("side") or "both") not in (side, "both"):
+        return False
+    gate = str(block.get("gate") or "always")
+    if gate == "occupied" and not occupied:
+        return False
+    if gate == "away" and occupied:
+        return False
+    when = block.get("when") or {}
+    start = _hhmm_to_minutes(when.get("start"))
+    end = _hhmm_to_minutes(when.get("end"))
+    if start is None or end is None:
+        return False
+    local = dt_util.as_local(dt_util.utc_from_timestamp(ts))
+    days = [d for d in (when.get("days") or []) if isinstance(d, str)]
+    if days and TOU_WEEKDAYS[local.weekday()] not in days:
+        return False
+    at = local.hour * 60 + local.minute
+    if start == end:
+        return True  # full day
+    if start < end:
+        return bool(start <= at < end)
+    return bool(at >= start or at < end)  # wraps past midnight
+
+
+def _apply_user_blocks(
+    blocks: Any,
+    side: str,
+    ts: float,
+    occupied: bool,
+    plain: float | None,
+    shaped: float,
+    mold_active: bool,
+    vacation_now: bool,
+) -> float | None:
+    """Room-level schedule blocks outrank the tariff machinery (chain step 3)."""
+    if plain is None:
+        return None  # off stays off
+    if not isinstance(blocks, list):
+        return shaped
+    active: Any = None
+    for block in blocks:
+        if _block_active(block, side, ts, occupied):
+            active = block  # later in the list wins
+    if active is None:
+        return shaped
+    cand = _value_candidate(active.get("value"), plain)
+    if cand is None:
+        return shaped
+    if side == "heat" and _heat_guarded(cand, shaped, plain, mold_active, vacation_now):
+        return shaped
+    return cand
+
+
 @dataclass
 class TouSegment:
     """A contiguous stretch of one tariff tier inside the horizon."""
@@ -518,7 +649,8 @@ class TouManager:
             return None
 
         area_id = str(room.get("area_id", ""))
-        windows = self._coast_windows(area_id, settings, timeline)
+        tariff_windows = self._compile_schedules(area_id, settings, timeline)
+        user_blocks = room.get("schedule_blocks") or []
         clamp_min = float(settings.get("tou_clamp_min", DEFAULT_TOU_CLAMP_MIN))
         clamp_max = float(settings.get("tou_clamp_max", DEFAULT_TOU_CLAMP_MAX))
         peak_floor = float(settings.get("tou_peak_heat_floor", DEFAULT_TOU_PEAK_HEAT_FLOOR))
@@ -536,6 +668,7 @@ class TouManager:
         presence_clears = bool(settings.get("presence_clears_override", False))
         vacation_until = settings.get("vacation_until")
         vacation_temp = settings.get("vacation_temp")
+        room_occupied = not room_vacant and not presence_away
 
         def adjust(ts: float, targets: TargetTemps) -> TargetTemps:
             heat, cool = targets.heat, targets.cool
@@ -547,36 +680,68 @@ class TouManager:
                 if not (presence_away and presence_clears):
                     return targets  # a manual override is never shaved
             vacation_now = vacation_until is not None and ts < float(vacation_until) and vacation_temp is not None
-            # A coast window is a synthesized schedule block: inside it the rule's
-            # temperature REPLACES tier shaping on its side (never raising demand);
-            # a side the rule left blank keeps plain tier shaping.
-            coast_heat: float | None = None
-            coast_cool: float | None = None
-            for w_start, w_end, w_heat, w_cool in windows:
-                if w_start <= ts < w_end:
-                    coast_heat, coast_cool = w_heat, w_cool
-                    break
+            # Unified target chain, weakest first: schedule (plain, already
+            # resolved upstream) -> tier shaping -> tariff schedule records ->
+            # user schedule blocks. Manual override, vacation and the mold /
+            # climate-mode guards keep priority; off stays off.
             tier = timeline.tier_at(ts)
-            if coast_heat is not None:
-                if heat is not None and coast_heat < heat and not mold_active:
-                    heat = coast_heat
-            elif heat is not None:
+            shaped_heat, shaped_cool = heat, cool
+            if heat is not None:
                 if tier == TOU_TIER_PEAK and not mold_active:
-                    heat = min(heat, peak_floor)
+                    shaped_heat = min(heat, peak_floor)
                 elif tier == TOU_TIER_MID and not mold_active:
-                    heat = max(heat - mid_delta, min(heat, clamp_min))
+                    shaped_heat = max(heat - mid_delta, min(heat, clamp_min))
                 elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
-                    heat = max(min(heat + boost_delta, boost_cap), heat)
-            if coast_cool is not None:
-                if cool is not None and coast_cool > cool:
-                    cool = coast_cool
-            elif cool is not None:
+                    shaped_heat = max(min(heat + boost_delta, boost_cap), heat)
+            if cool is not None:
                 if tier == TOU_TIER_PEAK:
-                    cool = max(cool, peak_ceiling)
+                    shaped_cool = max(cool, peak_ceiling)
                 elif tier == TOU_TIER_MID:
-                    cool = min(cool + mid_delta, max(cool, clamp_max))
+                    shaped_cool = min(cool + mid_delta, max(cool, clamp_max))
                 elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
-                    cool = min(max(cool - boost_delta, min(cool, clamp_min)), cool)
+                    shaped_cool = min(max(cool - boost_delta, min(cool, clamp_min)), cool)
+            heat = _apply_tariff_windows(
+                tariff_windows["heat"],
+                ts,
+                targets.heat,
+                shaped_heat,  # type: ignore[arg-type]
+                clamp_min,
+                clamp_max,
+                mold_active,
+                vacation_now,
+                True,
+            )
+            cool = _apply_tariff_windows(
+                tariff_windows["cool"],
+                ts,
+                targets.cool,
+                shaped_cool,  # type: ignore[arg-type]
+                clamp_min,
+                clamp_max,
+                mold_active,
+                vacation_now,
+                False,
+            )
+            heat = _apply_user_blocks(
+                user_blocks,
+                "heat",
+                ts,
+                room_occupied,
+                targets.heat,
+                heat,  # type: ignore[arg-type]
+                mold_active,
+                vacation_now,  # type: ignore[arg-type]
+            )
+            cool = _apply_user_blocks(
+                user_blocks,
+                "cool",
+                ts,
+                room_occupied,
+                targets.cool,
+                cool,  # type: ignore[arg-type]
+                mold_active,
+                vacation_now,  # type: ignore[arg-type]
+            )
             return TargetTemps(heat=heat, cool=cool)
 
         return adjust
@@ -586,85 +751,199 @@ class TouManager:
         tiers = {seg.tier for seg in timeline.segments} - {TOU_TIER_UNKNOWN}
         return len(tiers) > 1
 
-    def _coast_windows(
+    @staticmethod
+    def schedules(settings: dict[str, Any]) -> list[dict[str, Any]]:
+        """Tariff schedule records: explicit ``tou_schedules``, else migrated coast rules."""
+        records = settings.get("tou_schedules")
+        if isinstance(records, list):
+            return [r for r in records if isinstance(r, dict)]
+        return TouManager._migrate_coast_rules(settings)
+
+    @staticmethod
+    def _migrate_coast_rules(settings: dict[str, Any]) -> list[dict[str, Any]]:
+        """Convert legacy coast rules into guarded one-way schedule records.
+
+        Read-time only (storage is untouched until the user saves schedules), so
+        downgrades keep working. The trigger's from-tier is kept via
+        ``from_tier``. Two deliberate behavior changes ride along: every
+        matching boundary now produces a window (legacy used the first only),
+        and ``post_hold: stay`` becomes ``until: next_change``, an accepted
+        approximation of the old end-then-extend combination.
+        """
+        out: list[dict[str, Any]] = []
+        for rule in settings.get("tou_coast_rules") or []:
+            if not isinstance(rule, dict) or not rule.get("enabled", True):
+                continue
+            trigger = rule.get("trigger") or {}
+            tier = str(trigger.get("to_tier") or "") or "any"
+            from_tier = str(trigger.get("from_tier") or "")
+            end_cfg = rule.get("end") or {}
+            end_mode = str(end_cfg.get("mode", "duration"))
+            end_value = end_cfg.get("value")
+            if str(rule.get("post_hold") or "") == "stay":
+                until, minutes, clock, until_tier = "next_change", 0, "", ""
+            elif end_mode == "duration":
+                until, minutes, clock, until_tier = "minutes", end_value, "", ""  # type: ignore[assignment]
+            elif end_mode == "clock":
+                until, minutes, clock, until_tier = "clock", 0, str(end_value or ""), ""
+            elif end_mode == "tier_window":
+                tier_val = str(end_value or "")
+                if tier_val and tier_val != "any":
+                    until, minutes, clock, until_tier = "next_tier_change", 0, "", tier_val
+                else:
+                    # "" is the beta.6 "any tier change" end.
+                    until, minutes, clock, until_tier = "next_change", 0, "", ""
+            else:
+                continue
+            rid = str(rule.get("id") or "r")
+            for side, key in (("heat", "coast_heat_temp"), ("cool", "coast_cool_temp")):
+                temp = rule.get(key, rule.get("coast_temp"))
+                if not isinstance(temp, (int, float)) or isinstance(temp, bool):
+                    continue
+                out.append(
+                    {
+                        "id": f"{rid}-{side}",
+                        "name": str(rule.get("name") or "Coast"),
+                        "enabled": True,
+                        "rooms": list(rule.get("rooms") or []),
+                        "side": side,
+                        "tier": tier,
+                        "from_tier": from_tier,
+                        "edge": "start",
+                        "phase": "after",
+                        "minutes": minutes,
+                        "until": until,
+                        "until_tier": until_tier,
+                        "clock": clock,
+                        "between": None,
+                        "guard": True,
+                        "value": {"mode": "set", "temp": float(temp)},
+                    }
+                )
+        return out
+
+    def _compile_schedules(
         self,
         area_id: str,
         settings: dict[str, Any],
         timeline: TouTimeline,
-    ) -> list[tuple[float, float, float | None, float | None]]:
-        """Materialize [start, end, coast_heat, coast_cool] windows for one room.
-
-        A blank coast temperature skips that mode (tier shaping still applies
-        there); a rule blank on both sides produces no window. Legacy rules
-        carry a single ``coast_temp``, which stands in for both sides — the
-        drift guards made it a no-op in the irrelevant direction anyway.
-        """
-        rules = settings.get("tou_coast_rules") or []
-        windows: list[tuple[float, float, float | None, float | None]] = []
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Expand records into per-side [start, end) windows; list order = priority."""
+        cap = float(settings.get("tou_coast_max_minutes", DEFAULT_TOU_COAST_MAX_MINUTES))
         horizon_end = timeline.segments[-1].end if timeline.segments else time.time()
-        for rule in rules:
-            if not isinstance(rule, dict) or not rule.get("enabled", True):
+        out: dict[str, list[dict[str, Any]]] = {"heat": [], "cool": []}
+        boundaries = timeline.boundaries()
+        for rec in self.schedules(settings):
+            if not rec.get("enabled", True) or area_id not in (rec.get("rooms") or []):
                 continue
-            if area_id not in (rule.get("rooms") or []):
+            side = str(rec.get("side") or "")
+            if side not in out:
                 continue
-            legacy = rule.get("coast_temp")
-            coast_heat = self._coast_value(rule.get("coast_heat_temp", legacy))
-            coast_cool = self._coast_value(rule.get("coast_cool_temp", legacy))
-            if coast_heat is None and coast_cool is None:
+            tier = str(rec.get("tier") or "any")
+            from_tier = str(rec.get("from_tier") or "")
+            edge = str(rec.get("edge") or "start")
+            phase = str(rec.get("phase") or "after")
+            try:
+                minutes = float(rec.get("minutes") or 0)
+            except (TypeError, ValueError):
                 continue
-            trigger = rule.get("trigger") or {}
-            from_tier = str(trigger.get("from_tier", ""))
-            to_tier = str(trigger.get("to_tier", ""))
-            end_cfg = rule.get("end") or {}
-            end_mode = str(end_cfg.get("mode", "duration"))
-            end_value = end_cfg.get("value")
-            post_hold = str(rule.get("post_hold") or "schedule")
-            cap_minutes = float(settings.get("tou_coast_max_minutes", DEFAULT_TOU_COAST_MAX_MINUTES))
-            for b_ts, b_from, b_to in timeline.boundaries():
-                if (from_tier and b_from != from_tier) or (to_tier and b_to != to_tier):
+            for b_ts, b_from, b_to in boundaries:
+                if tier != "any" and (b_to if edge == "start" else b_from) != tier:
                     continue
-                end = self._window_end(b_ts, end_mode, end_value, timeline, cap_minutes, horizon_end)
-                if end is None or end <= b_ts:
+                if edge == "start" and from_tier and b_from != from_tier:
                     continue
-                if post_hold == "stay":
-                    nxt = timeline.next_boundary_after(end)
-                    end = nxt if nxt is not None else horizon_end
-                windows.append((b_ts, min(end, horizon_end), coast_heat, coast_cool))
-                break  # one window per rule: the first matching boundary in the horizon
-        windows.sort(key=lambda w: w[0])
-        return windows
+                if not self._between_ok(b_ts, rec.get("between")):
+                    continue
+                if phase == "before":
+                    if minutes <= 0:
+                        continue
+                    start, end = b_ts - minutes * 60.0, b_ts
+                else:
+                    start = b_ts
+                    end = self._schedule_end(rec, b_ts, minutes, timeline, cap, horizon_end)  # type: ignore[assignment]
+                    if end is None:
+                        continue
+                if start < horizon_end and end > start:
+                    out[side].append({"rec": rec, "start": start, "end": min(end, horizon_end)})
+        return out
 
-    @staticmethod
-    def _coast_value(raw: Any) -> float | None:
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            return None
-        return float(raw)
-
-    def _window_end(
+    def _schedule_end(
         self,
-        boundary_ts: float,
-        end_mode: str,
-        end_value: Any,
+        rec: dict[str, Any],
+        b_ts: float,
+        minutes: float,
         timeline: TouTimeline,
-        cap_minutes: float,
+        cap: float,
         horizon_end: float,
     ) -> float | None:
-        """Resolve a rule's end condition into a timestamp after the boundary."""
-        if end_mode == "duration":
-            try:
-                minutes = float(end_value)
-            except (TypeError, ValueError):
+        """End of an after-phase record: fixed minutes, window, clock, or tier."""
+        until = str(rec.get("until") or "window")
+        if until == "minutes":
+            return b_ts + minutes * 60.0 if minutes > 0 else None
+        if until in ("window", "next_change"):
+            nxt = timeline.next_boundary_after(b_ts)
+            return nxt if nxt is not None else horizon_end
+        if until == "clock":
+            return self._next_clock_ts(b_ts, str(rec.get("clock") or ""))
+        if until == "next_tier_change":
+            tier = str(rec.get("until_tier") or "")
+            if not tier:
                 return None
-            return boundary_ts + minutes * 60.0
-        if end_mode == "clock":
-            return self._next_clock_ts(boundary_ts, str(end_value or ""))
-        if end_mode == "tier_window":
-            tier = str(end_value or "")
-            nxt = timeline.next_boundary_after(boundary_ts, tier or None)
-            if nxt is not None:
-                return nxt
-            return min(boundary_ts + cap_minutes * 60.0, horizon_end)
+            nxt = timeline.next_boundary_after(b_ts, tier)
+            return nxt if nxt is not None else min(b_ts + cap * 60.0, horizon_end)
         return None
+
+    @staticmethod
+    def _between_ok(b_ts: float, between: Any) -> bool:
+        """True when the boundary's local time falls inside the optional range."""
+        if not isinstance(between, dict):
+            return True
+        try:
+            f_h, f_m = (int(p) for p in str(between.get("from", "")).split(":")[:2])
+            t_h, t_m = (int(p) for p in str(between.get("to", "")).split(":")[:2])
+        except (ValueError, TypeError):
+            return True
+        f, t = f_h * 60 + f_m, t_h * 60 + t_m
+        if f == t or not (0 <= f <= 1439 and 0 <= t <= 1439):
+            return True
+        local = dt_util.as_local(dt_util.utc_from_timestamp(b_ts))
+        at = local.hour * 60 + local.minute
+        if f < t:
+            return bool(f <= at < t)
+        return bool(at >= f or at < t)  # wraps past midnight
+
+    def preview(self, settings: dict[str, Any], area_id: str | None = None) -> dict[str, Any] | None:
+        """Tier segments + compiled tariff windows + per-record fire counts."""
+        timeline = self._timeline
+        if timeline is None or not settings.get("tou_enabled", False):
+            return None
+        records = self.schedules(settings)
+        areas = (
+            sorted({str(a) for rec in records for a in (rec.get("rooms") or []) if str(a)})
+            if area_id is None
+            else [area_id]
+        )
+        areas_out: dict[str, Any] = {}
+        fire_stats: dict[str, dict[str, Any]] = {}
+        for area in areas:
+            windows = self._compile_schedules(area, settings, timeline)
+            rows: list[dict[str, Any]] = []
+            for side in ("heat", "cool"):
+                for w in windows[side]:
+                    rec = w["rec"]
+                    rid = str(rec.get("id", ""))
+                    rows.append({"start": round(w["start"], 1), "end": round(w["end"], 1), "side": side, "id": rid})
+                    stat = fire_stats.setdefault(rid, {"count": 0, "first": None})
+                    stat["count"] += 1
+                    if stat["first"] is None or w["start"] < stat["first"]:
+                        stat["first"] = round(w["start"], 1)
+            areas_out[area] = rows
+        return {
+            "now": round(time.time(), 1),
+            "segments": [[round(s.start, 1), round(s.end, 1), s.tier] for s in timeline.segments],
+            "areas": areas_out,
+            "records": fire_stats,
+        }
 
     @staticmethod
     def _next_clock_ts(after_ts: float, hhmm: str) -> float | None:

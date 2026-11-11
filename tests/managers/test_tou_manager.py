@@ -6,6 +6,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.util import dt as dt_util
 
 from custom_components.roommind.const import (
     TOU_SOURCE_PERIOD,
@@ -712,6 +713,214 @@ def test_coast_window_any_tier_end() -> None:
     assert adjust(b2 + 5.0, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
 
 
+def test_schedule_arrive_then_coast_chain() -> None:
+    """The contributor scenario: reach 23 by the peak, then coast to an 18 floor."""
+    mgr = TouManager(_make_hass({}))
+    b = time.time() + 3600.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=time.time(), end=b, tier=TOU_TIER_OFF),
+            TouSegment(start=b, end=time.time() + 16 * 3600, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    settings = {
+        "tou_schedules": [
+            {
+                "id": "arrival",
+                "name": "warm by peak",
+                "enabled": True,
+                "rooms": ["living"],
+                "side": "heat",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "before",
+                "minutes": 40,
+                "until": "window",
+                "value": {"mode": "set", "temp": 23.0},
+            },
+            {
+                "id": "peakfloor",
+                "name": "coast peak",
+                "enabled": True,
+                "rooms": ["living"],
+                "side": "heat",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "after",
+                "until": "window",
+                "value": {"mode": "set", "temp": 18.0},
+            },
+        ]
+    }
+    adjust = mgr.make_adjuster(_room(), settings)
+    assert adjust is not None
+    # lead window [b-40m, b): floor raised to 23 so the MPC pre-heats,
+    # despite the plain peak shaping wanting to cap heat at 18.
+    assert adjust(b - 1800.0, TargetTemps(heat=21.0, cool=None)).heat == 23.0
+    # at the boundary the arrival record ends and the coast floor applies.
+    assert adjust(b + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 18.0
+    # before the lead, plain tier shaping (off -> no peak cap yet: schedule).
+    assert adjust(b - 3600.0, TargetTemps(heat=21.0, cool=None)).heat == 21.0
+
+
+def test_schedule_fires_every_occurrence_and_shift_is_plain_relative() -> None:
+    """Two peaks in the horizon both get the window; shift bases on the schedule."""
+    mgr = TouManager(_make_hass({}))
+    b1 = time.time() + 1800.0
+    b2 = b1 + 3600.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=time.time(), end=b1, tier=TOU_TIER_OFF),
+            TouSegment(start=b1, end=b2, tier=TOU_TIER_PEAK),
+            TouSegment(start=b2, end=b2 + 1800.0, tier=TOU_TIER_OFF),
+            TouSegment(start=b2 + 1800.0, end=time.time() + 16 * 3600, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    settings = {
+        "tou_schedules": [
+            {
+                "id": "relax",
+                "name": "relax",
+                "enabled": True,
+                "rooms": ["living"],
+                "side": "cool",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "after",
+                "until": "window",
+                "value": {"mode": "shift", "direction": "raise", "delta": 1.5},
+            }
+        ]
+    }
+    adjust = mgr.make_adjuster(_room(), settings)
+    assert adjust is not None
+    # every peak gets it: +1.5 on the plain schedule cool, not on the peak-shaped value
+    assert adjust(b1 + 60.0, TargetTemps(heat=None, cool=24.0)).cool == 25.5
+    assert adjust(b2 + 1860.0, TargetTemps(heat=None, cool=24.0)).cool == 25.5
+    # off tier between peaks: schedule untouched
+    assert adjust(b2 + 60.0, TargetTemps(heat=None, cool=24.0)).cool == 24.0
+
+
+def test_user_blocks_outrank_tariff_and_gate_on_presence() -> None:
+    """Room schedule blocks beat tariff records; occupied/away gates flip that."""
+    mgr = TouManager(_make_hass({}))
+    b = time.time() + 1800.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=time.time(), end=b, tier=TOU_TIER_OFF),
+            TouSegment(start=b, end=time.time() + 16 * 3600, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    local = dt_util.as_local(dt_util.utc_from_timestamp(b + 60.0))
+    at = local.hour * 60 + local.minute
+    block = {
+        "id": "comfort",
+        "name": "comfort when in",
+        "enabled": True,
+        "side": "heat",
+        "gate": "occupied",
+        "when": {
+            "start": f"{(at - 60) % 1440 // 60:02d}:{(at - 60) % 60:02d}",
+            "end": f"{(at + 60) % 1440 // 60:02d}:{(at + 60) % 60:02d}",
+            "days": [],
+        },
+        "value": {"mode": "set", "temp": 21.0},
+    }
+    settings = {
+        "tou_schedules": [
+            {
+                "id": "peak18",
+                "name": "peak floor 18",
+                "enabled": True,
+                "rooms": ["living"],
+                "side": "heat",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "after",
+                "until": "window",
+                "value": {"mode": "set", "temp": 18.0},
+            }
+        ]
+    }
+    room = {**_room(), "schedule_blocks": [block]}
+    # occupied: the user block wins over the tariff coast
+    adjust = mgr.make_adjuster(room, settings)
+    assert adjust is not None
+    assert adjust(b + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 21.0
+    # vacant: the gate hides the block, the tariff floor applies
+    adjust = mgr.make_adjuster(room, settings, room_vacant=True)
+    assert adjust is not None
+    assert adjust(b + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 18.0
+
+
+def test_user_blocks_never_activate_off_sides_and_preview_reports_windows() -> None:
+    mgr = TouManager(_make_hass({}))
+    now = time.time()
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=now, end=now + 1800.0, tier=TOU_TIER_OFF),
+            TouSegment(start=now + 1800.0, end=now + 16 * 3600, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    local = dt_util.as_local(dt_util.utc_from_timestamp(now + 3600.0))
+    at = local.hour * 60 + local.minute
+    room = {
+        **_room(),
+        "schedule_blocks": [
+            {
+                "id": "all",
+                "name": "always both",
+                "enabled": True,
+                "side": "both",
+                "gate": "always",
+                "when": {
+                    "start": f"{(at - 60) % 1440 // 60:02d}:{(at - 60) % 60:02d}",
+                    "end": f"{(at + 60) % 1440 // 60:02d}:{(at + 60) % 60:02d}",
+                    "days": [],
+                },
+                "value": {"mode": "set", "temp": 20.0},
+            }
+        ],
+    }
+    adjust = mgr.make_adjuster(room, {})
+    assert adjust is not None
+    out = adjust(now + 3600.0, TargetTemps(heat=None, cool=24.0))
+    assert out.heat is None  # off stays off: no block activates a side
+    assert out.cool == 20.0
+
+    preview = mgr.preview(
+        {
+            "tou_enabled": True,
+            "tou_schedules": [
+                {
+                    "id": "p1",
+                    "name": "p",
+                    "enabled": True,
+                    "rooms": ["living"],
+                    "side": "heat",
+                    "tier": "peak",
+                    "edge": "start",
+                    "phase": "after",
+                    "until": "window",
+                    "value": {"mode": "set", "temp": 18.0},
+                }
+            ],
+        }
+    )
+    assert preview is not None
+    assert len(preview["segments"]) == 2
+    assert preview["records"]["p1"]["count"] == 1
+    assert len(preview["areas"]["living"]) == 1
+
+
 def test_coast_rule_requires_matching_room_and_enabled() -> None:
     mgr = TouManager(_make_hass({}))
     boundary = time.time() + 30.0
@@ -1035,3 +1244,106 @@ def test_coast_windows_ignores_malformed_rules() -> None:
     assert adjust is not None
     # None of the malformed rules produced a window: plain peak setback applies.
     assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
+
+
+def test_unified_chain_arrive_coast_and_occupied_override() -> None:
+    """The contributor scenario: reach 23 before the peak, coast to 18 during it,
+    and an occupied user block (21) outranks the tariff machinery live."""
+    mgr = TouManager(_make_hass({}))
+    now = time.time()
+    b = now + 3600.0  # peak starts in one hour
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=now, end=b, tier=TOU_TIER_OFF),
+            TouSegment(start=b, end=now + 16 * 3600.0, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    settings = {
+        "tou_schedules": [
+            {
+                "id": "arrive",
+                "name": "top up before the peak",
+                "rooms": ["living"],
+                "side": "heat",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "before",
+                "minutes": 40,
+                "value": {"mode": "set", "temp": 23.0},
+            },
+            {
+                "id": "coast",
+                "name": "coast through the peak",
+                "rooms": ["living"],
+                "side": "heat",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "after",
+                "until": "next_change",
+                "value": {"mode": "set", "temp": 18.0},
+            },
+        ]
+    }
+    room = _room()
+    adjust = mgr.make_adjuster(room, settings)
+    assert adjust is not None
+    # lead window [b-40m, b): the floor rises to 23 so the MPC tops up cheaply
+    assert adjust(b - 1800.0, TargetTemps(heat=21.0, cool=None)).heat == 23.0
+    # during the peak: the coast record replaces shaping, floor 18, drift allowed
+    assert adjust(b + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 18.0
+
+    # An occupied user block outranks both tariff records...
+    room["schedule_blocks"] = [
+        {
+            "id": "comfort",
+            "name": "someone is here",
+            "when": {"start": "00:00", "end": "00:00"},
+            "gate": "occupied",
+            "side": "heat",
+            "value": {"mode": "set", "temp": 21.0},
+        }
+    ]
+    assert mgr.make_adjuster(room, settings)(b + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 21.0
+    # ...and vanishes when the room goes vacant, leaving the coast intact
+    vacant = mgr.make_adjuster(room, settings, room_vacant=True)
+    assert vacant is not None
+    assert vacant(b + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 18.0
+
+
+def test_schedule_fires_every_occurrence_and_previews() -> None:
+    """Two peaks in the horizon produce two windows (legacy took the first only)."""
+    mgr = TouManager(_make_hass({}))
+    now = time.time()
+    marks = [now, now + 60.0, now + 3660.0, now + 7260.0, now + 10860.0, now + 16 * 3600.0]
+    tiers = [TOU_TIER_OFF, TOU_TIER_PEAK, TOU_TIER_OFF, TOU_TIER_PEAK]
+    mgr._timeline = TouTimeline(
+        [TouSegment(start=marks[i], end=marks[i + 1], tier=tiers[i]) for i in range(4)],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    settings = {
+        "tou_enabled": True,
+        "tou_schedules": [
+            {
+                "id": "p",
+                "name": "peak coast",
+                "rooms": ["living", "bed"],
+                "side": "heat",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "after",
+                "until": "window",
+                "value": {"mode": "set", "temp": 18.5},
+            }
+        ],
+    }
+    windows = mgr._compile_schedules("living", settings, mgr._timeline)
+    assert len(windows["heat"]) == 2
+    assert len(windows["cool"]) == 0
+
+    preview = mgr.preview(settings)
+    assert preview is not None
+    assert len(preview["segments"]) == 4
+    assert preview["records"]["p"]["count"] == 4  # two peaks x two rooms

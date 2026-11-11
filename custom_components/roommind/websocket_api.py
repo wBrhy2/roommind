@@ -23,19 +23,34 @@ from .const import (
     MIN_OCCUPANCY_ECO_DELAY_MINUTES,
     OVERRIDE_CUSTOM,
     OVERRIDE_TYPES,
+    TOU_BLOCK_GATES,
+    TOU_BLOCK_SIDES,
     TOU_COAST_DURATION_MAX_MINUTES,
     TOU_COAST_DURATION_MIN_MINUTES,
+    TOU_EDGES,
     TOU_END_MODES,
     TOU_LOOKAHEADS,
     TOU_MODES,
+    TOU_PHASES,
     TOU_POST_HOLD_MODES,
+    TOU_SCHEDULE_MINUTES_MAX,
+    TOU_SCHEDULE_MINUTES_MIN,
+    TOU_SCHEDULE_SHIFT_MAX,
+    TOU_SCHEDULE_SHIFT_MIN,
+    TOU_SCHEDULE_TEMP_MAX,
+    TOU_SCHEDULE_TEMP_MIN,
+    TOU_SHIFT_DIRECTIONS,
+    TOU_SIDES,
     TOU_TIER_SOURCES,
     TOU_TIERS,
+    TOU_UNTILS,
+    TOU_VALUE_MODES,
     TOU_WEEKDAYS,
     build_override_live,
     is_override_suppressed,
 )
 from .control.direct_valve import async_release_valve
+from .managers.tou_manager import TouManager
 from .services.analytics_service import (
     _compute_target_forecast,  # noqa: F401 - re-exported for tests
     _csv_to_points,  # noqa: F401 - re-exported for tests
@@ -112,6 +127,14 @@ if TYPE_CHECKING:
     from .coordinator import RoomMindCoordinator
 
 
+def _hhmm_ok(text: str) -> bool:
+    """True when text parses as HH:MM (0-23, 0-59)."""
+    parts = text.split(":")
+    if len(parts) < 2 or not (parts[0].isdigit() and parts[1].isdigit()):
+        return False
+    return 0 <= int(parts[0]) <= 23 and 0 <= int(parts[1]) <= 59
+
+
 def _get_coordinator(hass: HomeAssistant) -> RoomMindCoordinator | None:
     """Return the RoomMindCoordinator from hass.data, or None."""
     coordinator: RoomMindCoordinator | None = hass.data.get(DOMAIN, {}).get("coordinator")
@@ -170,6 +193,7 @@ _ROOM_SAVE_FIELDS = (
     "tou_mode",
     "tou_max_boost",
     "tou_boost_unoccupied",
+    "schedule_blocks",
 )
 
 _SETTINGS_SAVE_FIELDS = (
@@ -237,6 +261,7 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_clamp_max",
     "tou_coast_max_minutes",
     "tou_coast_rules",
+    "tou_schedules",
 )
 
 
@@ -508,6 +533,26 @@ async def websocket_list_rooms(
         vol.Optional("tou_mode"): vol.In(TOU_MODES),
         vol.Optional("tou_max_boost"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
         vol.Optional("tou_boost_unoccupied"): bool,
+        vol.Optional("schedule_blocks"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("name"): str,
+                vol.Optional("enabled", default=True): bool,
+                vol.Required("when"): {
+                    vol.Required("start"): str,
+                    vol.Required("end"): str,
+                    vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
+                },
+                vol.Optional("gate", default="always"): vol.In(TOU_BLOCK_GATES),
+                vol.Optional("side", default="both"): vol.In(TOU_BLOCK_SIDES),
+                vol.Required("value"): {
+                    vol.Required("mode"): vol.In(TOU_VALUE_MODES),
+                    vol.Optional("temp"): vol.Coerce(float),
+                    vol.Optional("direction"): vol.In(TOU_SHIFT_DIRECTIONS),
+                    vol.Optional("delta"): vol.Coerce(float),
+                },
+            }
+        ],
     }
 )
 @websocket_api.async_response
@@ -537,6 +582,27 @@ async def websocket_save_room(
     if err:
         connection.send_error(msg["id"], "duplicate_entity", err)
         return
+    # Room schedule blocks: unique ids, valid clock times, coherent values
+    blocks = config.get("schedule_blocks")
+    if blocks:
+        block_ids = [str(b.get("id", "")) for b in blocks]
+        if len(block_ids) != len(set(block_ids)):
+            connection.send_error(msg["id"], "duplicate_schedule_block_id", "Schedule block IDs must be unique")
+            return
+        for b in blocks:
+            when = b.get("when") or {}
+            if not _hhmm_ok(str(when.get("start") or "")) or not _hhmm_ok(str(when.get("end") or "")):
+                connection.send_error(
+                    msg["id"], "invalid_schedule_block_time", "Schedule blocks need 'HH:MM' start and end"
+                )
+                return
+            value = b.get("value") or {}
+            if value.get("mode") == "set" and not isinstance(value.get("temp"), (int, float)):
+                connection.send_error(msg["id"], "invalid_schedule_block_value", "'set' blocks need a temperature")
+                return
+            if value.get("mode") == "shift" and value.get("direction") not in TOU_SHIFT_DIRECTIONS:
+                connection.send_error(msg["id"], "invalid_schedule_block_value", "'shift' blocks need a direction")
+                return
 
     if ("thermostats" in config or "acs" in config) and "devices" not in config:
         _LOGGER.warning(
@@ -776,7 +842,11 @@ async def websocket_get_settings(
 ) -> None:
     """Return global settings."""
     store = hass.data[DOMAIN]["store"]
-    connection.send_result(msg["id"], {"settings": store.get_settings()})
+    settings = store.get_settings()
+    # Bootstrap the schedule editor from coast rules that predate schedules.
+    if "tou_schedules" not in settings and settings.get("tou_coast_rules"):
+        settings = {**settings, "tou_schedules": TouManager.schedules(settings)}
+    connection.send_result(msg["id"], {"settings": settings})
 
 
 # ---------------------------------------------------------------------------
@@ -912,6 +982,36 @@ async def websocket_get_settings(
                     vol.Required("value"): vol.Any(vol.Coerce(int), str),
                 },
                 vol.Optional("post_hold", default="schedule"): vol.In(TOU_POST_HOLD_MODES),
+            }
+        ],
+        # Tariff schedules (unified chain): edge-anchored adjustments; saving
+        # them strips the superseded legacy editor data. guard is internal.
+        vol.Optional("tou_schedules"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("name"): str,
+                vol.Optional("enabled", default=True): bool,
+                vol.Required("rooms"): vol.All([str], vol.Length(min=1)),
+                vol.Required("side"): vol.In(TOU_SIDES),
+                vol.Optional("tier", default="any"): vol.In([*TOU_TIERS, "any"]),
+                vol.Optional("from_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
+                vol.Optional("edge", default="start"): vol.In(TOU_EDGES),
+                vol.Optional("phase", default="after"): vol.In(TOU_PHASES),
+                vol.Optional("minutes", default=0): vol.Coerce(int),
+                vol.Optional("until", default="window"): vol.In(TOU_UNTILS),
+                vol.Optional("until_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
+                vol.Optional("clock", default=""): str,
+                vol.Optional("between", default=None): vol.Any(
+                    None,
+                    {vol.Required("from"): str, vol.Required("to"): str},
+                ),
+                vol.Optional("guard", default=False): bool,
+                vol.Required("value"): {
+                    vol.Required("mode"): vol.In(TOU_VALUE_MODES),
+                    vol.Optional("temp"): vol.Coerce(float),
+                    vol.Optional("direction"): vol.In(TOU_SHIFT_DIRECTIONS),
+                    vol.Optional("delta"): vol.Coerce(float),
+                },
             }
         ],
     }
@@ -1082,6 +1182,58 @@ async def websocket_save_settings(
                 )
                 return
 
+    # Tariff schedules: value/lead/clock/until/between checks, then supersede.
+    schedules = changes.get("tou_schedules")
+    if schedules is not None:
+        sched_ids = [s.get("id", "") for s in schedules]
+        if len(sched_ids) != len(set(sched_ids)):
+            connection.send_error(msg["id"], "duplicate_tou_schedule_id", "Schedule IDs must be unique")
+            return
+        for s in schedules:
+            phase, until = s.get("phase", "after"), s.get("until", "window")
+            minutes = int(s.get("minutes") or 0)
+            if (phase == "before" or until == "minutes") and not (
+                TOU_SCHEDULE_MINUTES_MIN <= minutes <= TOU_SCHEDULE_MINUTES_MAX
+            ):
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_schedule",
+                    f"Schedule lead/duration needs {TOU_SCHEDULE_MINUTES_MIN}-{TOU_SCHEDULE_MINUTES_MAX} minutes",
+                )
+                return
+            if until == "clock" and not _hhmm_ok(str(s.get("clock") or "")):
+                connection.send_error(msg["id"], "invalid_tou_schedule", "Clock schedules need 'HH:MM'")
+                return
+            if until == "next_tier_change" and s.get("until_tier") not in TOU_TIERS:
+                connection.send_error(msg["id"], "invalid_tou_schedule", "next_tier_change needs a known tier")
+                return
+            between = s.get("between")
+            if between and not (_hhmm_ok(str(between.get("from") or "")) and _hhmm_ok(str(between.get("to") or ""))):
+                connection.send_error(msg["id"], "invalid_tou_schedule", "'between' needs 'HH:MM' values")
+                return
+            value = s.get("value") or {}
+            if value.get("mode") == "set":
+                temp = value.get("temp")
+                if not isinstance(temp, (int, float)) or not (
+                    TOU_SCHEDULE_TEMP_MIN <= float(temp) <= TOU_SCHEDULE_TEMP_MAX
+                ):
+                    connection.send_error(
+                        msg["id"], "invalid_tou_schedule", f"'set' needs a temp {TOU_SCHEDULE_TEMP_MIN:g}+"
+                    )
+                    return
+            else:
+                delta = value.get("delta")
+                if (
+                    not isinstance(delta, (int, float))
+                    or not (TOU_SCHEDULE_SHIFT_MIN <= abs(float(delta)) <= TOU_SCHEDULE_SHIFT_MAX)
+                    or value.get("direction") not in TOU_SHIFT_DIRECTIONS
+                ):
+                    connection.send_error(
+                        msg["id"], "invalid_tou_schedule", "'shift' needs direction and a delta 0.5-8"
+                    )
+                    return
+        changes["tou_coast_rules"] = []  # schedules supersede the legacy editor
+
     settings = await store.async_save_settings(changes)
     connection.send_result(msg["id"], {"settings": settings})
     coordinator = _get_coordinator(hass)
@@ -1093,6 +1245,31 @@ async def websocket_save_settings(
 # ---------------------------------------------------------------------------
 # Target temperature forecast (for analytics chart)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Tariff schedule preview (schedule editor: tier bands, windows, fire counts)
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/tou/preview",
+        vol.Optional("area_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_tou_preview(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Return compiled tariff windows + tier segments for the schedule editor."""
+    store = hass.data[DOMAIN]["store"]
+    coordinator = _get_coordinator(hass)
+    manager = getattr(coordinator, "_tou_manager", None) if coordinator else None
+    preview = manager.preview(store.get_settings(), msg.get("area_id")) if manager is not None else None
+    connection.send_result(msg["id"], {"preview": preview or {"segments": [], "areas": {}, "records": {}}})
+
 
 # ---------------------------------------------------------------------------
 # Get analytics data
@@ -1305,3 +1482,4 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_boost_learning)
     websocket_api.async_register_command(hass, websocket_get_diagnostics)
     websocket_api.async_register_command(hass, websocket_covers_clear_override)
+    websocket_api.async_register_command(hass, websocket_tou_preview)

@@ -296,6 +296,7 @@ class RoomMindStore:
             "tou_mode": config.get("tou_mode", "off"),
             "tou_max_boost": config.get("tou_max_boost", None),
             "tou_boost_unoccupied": config.get("tou_boost_unoccupied", False),
+            "schedule_blocks": config.get("schedule_blocks", []),
         }
         _single_temps_to_cool_side(room, config, room["climate_mode"])
         # Directional device sync for new rooms (truthiness check, not just presence)

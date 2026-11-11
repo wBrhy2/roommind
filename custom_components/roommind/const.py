@@ -275,6 +275,27 @@ TOU_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturda
 TOU_END_MODES = ["duration", "clock", "tier_window"]
 TOU_POST_HOLD_MODES = ["stay", "schedule"]
 
+# Tariff schedules (unified target chain): records anchored on tier-window
+# edges. A record targets exactly one side so a heating adjustment can never
+# command cooling and vice versa. Replaces coast rules, which migrate at read.
+TOU_SIDES = ["heat", "cool"]
+TOU_EDGES = ["start", "end"]
+TOU_PHASES = ["before", "after"]
+TOU_UNTILS = ["minutes", "window", "next_change", "clock", "next_tier_change"]
+TOU_VALUE_MODES = ["set", "shift"]
+TOU_SHIFT_DIRECTIONS = ["raise", "lower"]
+TOU_SCHEDULE_MINUTES_MIN = 5
+TOU_SCHEDULE_MINUTES_MAX = 720
+TOU_SCHEDULE_SHIFT_MIN = 0.5
+TOU_SCHEDULE_SHIFT_MAX = 8.0
+TOU_SCHEDULE_TEMP_MIN = 5.0
+TOU_SCHEDULE_TEMP_MAX = 40.0
+
+# Room-level user schedule blocks (chain step 3): time-of-day overrides that
+# outrank tariff machinery; "both" applies to whichever side(s) run.
+TOU_BLOCK_GATES = ["always", "occupied", "away"]
+TOU_BLOCK_SIDES = ["heat", "cool", "both"]
+
 # Tier shaping defaults (settings, all °C internal like the rest of the model).
 DEFAULT_TOU_PEAK_HEAT_FLOOR = 18.0  # PEAK: heat target never above this
 DEFAULT_TOU_PEAK_COOL_CEILING = 28.0  # PEAK: cool target never below this

@@ -1907,14 +1907,14 @@ async def test_analytics_model_has_occupancy_sensors_false(ws_hass, store, conne
 
 
 def test_register_websocket_commands(hass):
-    """async_register_websocket_commands registers all 13 commands."""
+    """async_register_websocket_commands registers all 14 commands."""
     from unittest.mock import patch
 
     from custom_components.roommind.websocket_api import async_register_websocket_commands
 
     with patch("custom_components.roommind.websocket_api.websocket_api.async_register_command") as mock_reg:
         async_register_websocket_commands(hass)
-        assert mock_reg.call_count == 13
+        assert mock_reg.call_count == 14
 
 
 # ---------------------------------------------------------------------------
@@ -3548,6 +3548,93 @@ async def test_save_settings_tou_coast_needs_one_side(ws_hass, store, connection
 
     assert connection.send_result.call_count == 0
     assert connection.send_error.call_args[0][1] == "invalid_tou_coast_temp"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_schedules_supersede_coast(ws_hass, store, connection):
+    """Schedules persist, strip the legacy editor, and enforce lead ranges."""
+    await store.async_load()
+
+    msg = {
+        "id": 70,
+        "type": "roommind/settings/save",
+        "tou_schedules": [
+            {
+                "id": "s1",
+                "name": "cool relax",
+                "rooms": ["living_room"],
+                "side": "cool",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "after",
+                "until": "minutes",
+                "minutes": 90,
+                "value": {"mode": "shift", "direction": "raise", "delta": 2.0},
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    saved = connection.send_result.call_args[0][1]["settings"]
+    assert saved["tou_coast_rules"] == []
+    assert saved["tou_schedules"][0]["minutes"] == 90
+
+    bad = {
+        "id": 71,
+        "type": "roommind/settings/save",
+        "tou_schedules": [
+            {
+                "id": "s2",
+                "name": "too short",
+                "rooms": ["living_room"],
+                "side": "heat",
+                "phase": "before",
+                "minutes": 2,
+                "value": {"mode": "set", "temp": 23.0},
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, bad)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_schedule"
+
+
+@pytest.mark.asyncio
+async def test_save_room_schedule_blocks(ws_hass, store, connection):
+    """Occupancy-gated user blocks persist on the room; bad times are rejected."""
+    await store.async_load()
+
+    msg = {
+        "id": 72,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "schedule_blocks": [
+            {
+                "id": "b1",
+                "name": "evening comfort",
+                "when": {"start": "17:00", "end": "21:30"},
+                "gate": "occupied",
+                "side": "both",
+                "value": {"mode": "set", "temp": 21.5},
+            }
+        ],
+    }
+    await _save_room(ws_hass, connection, msg)
+    room = connection.send_result.call_args[0][1]["room"]
+    assert room["schedule_blocks"][0]["gate"] == "occupied"
+
+    bad = {
+        "id": 73,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "schedule_blocks": [
+            {"id": "b", "name": "n", "when": {"start": "25:00", "end": "08:00"}, "value": {"mode": "set", "temp": 20.0}}
+        ],
+    }
+    await _save_room(ws_hass, connection, bad)
+    assert connection.send_error.call_args[0][1] == "invalid_schedule_block_time"
 
 
 @pytest.mark.asyncio
