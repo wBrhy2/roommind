@@ -12,6 +12,7 @@ import type {
   DeviceType,
   DeviceRole,
   TouMode,
+  TouOverride,
 } from "../types";
 import "./rs-hero-status";
 import "./rs-climate-mode-selector";
@@ -105,6 +106,7 @@ export class RsRoomDetail extends LitElement {
   @state() private _touMode: TouMode = "off";
   @state() private _touMaxBoost = 28;
   @state() private _touBoostUnoccupied = false;
+  @state() private _touOverrides: TouOverride[] = [];
   @state() private _optimisticCoverResume = false;
 
   private _prevAreaId: string | null = null;
@@ -315,6 +317,7 @@ export class RsRoomDetail extends LitElement {
       this._touMode = this.config.tou_mode ?? "off";
       this._touMaxBoost = this.config.tou_max_boost ?? 28;
       this._touBoostUnoccupied = this.config.tou_boost_unoccupied ?? false;
+      this._touOverrides = this.config.tou_overrides ?? [];
     } else {
       this._devices = [];
       this._selectedTempSensor = "";
@@ -362,6 +365,7 @@ export class RsRoomDetail extends LitElement {
       this._touMode = "off";
       this._touMaxBoost = 28;
       this._touBoostUnoccupied = false;
+      this._touOverrides = [];
     }
     this._dirty = false;
 
@@ -664,6 +668,7 @@ export class RsRoomDetail extends LitElement {
                     .touMode=${this._touMode}
                     .touMaxBoost=${this._touMaxBoost}
                     .touBoostUnoccupied=${this._touBoostUnoccupied}
+                    .overrides=${this._touOverrides}
                     @setting-changed=${this._onTouSettingChanged}
                   ></rs-tou-section>
                 </rs-section-card>`
@@ -965,6 +970,7 @@ export class RsRoomDetail extends LitElement {
             .touMode=${this._touMode}
             .touMaxBoost=${this._touMaxBoost}
             .touBoostUnoccupied=${this._touBoostUnoccupied}
+            .overrides=${this._touOverrides}
             @setting-changed=${this._onTouSettingChanged}
           ></rs-tou-section>
         </rs-edit-dialog>`;
@@ -1186,6 +1192,7 @@ export class RsRoomDetail extends LitElement {
     if (key === "tou_mode") this._touMode = value as TouMode;
     else if (key === "tou_max_boost") this._touMaxBoost = value as number;
     else if (key === "tou_boost_unoccupied") this._touBoostUnoccupied = value as boolean;
+    else if (key === "tou_overrides") this._touOverrides = value as TouOverride[];
     this._autoSave();
   }
 
@@ -1268,6 +1275,7 @@ export class RsRoomDetail extends LitElement {
         tou_mode: this._touMode,
         tou_max_boost: this._touMaxBoost,
         tou_boost_unoccupied: this._touBoostUnoccupied,
+        tou_overrides: this._touOverrides,
       });
 
       this._dirty = false;

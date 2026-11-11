@@ -25,14 +25,13 @@ from .const import (
     OVERRIDE_TYPES,
     TOU_BLOCK_GATES,
     TOU_BLOCK_SIDES,
-    TOU_COAST_DURATION_MAX_MINUTES,
-    TOU_COAST_DURATION_MIN_MINUTES,
+    TOU_BLOCK_VALUE_MODES,
     TOU_EDGES,
-    TOU_END_MODES,
     TOU_LOOKAHEADS,
     TOU_MODES,
     TOU_PHASES,
-    TOU_POST_HOLD_MODES,
+    TOU_ROW_ACTIONS,
+    TOU_ROW_UNTILS,
     TOU_SCHEDULE_MINUTES_MAX,
     TOU_SCHEDULE_MINUTES_MIN,
     TOU_SCHEDULE_SHIFT_MAX,
@@ -50,7 +49,6 @@ from .const import (
     is_override_suppressed,
 )
 from .control.direct_valve import async_release_valve
-from .managers.tou_manager import TouManager
 from .services.analytics_service import (
     _compute_target_forecast,  # noqa: F401 - re-exported for tests
     _csv_to_points,  # noqa: F401 - re-exported for tests
@@ -194,6 +192,7 @@ _ROOM_SAVE_FIELDS = (
     "tou_max_boost",
     "tou_boost_unoccupied",
     "schedule_blocks",
+    "tou_overrides",
 )
 
 _SETTINGS_SAVE_FIELDS = (
@@ -260,7 +259,6 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_clamp_min",
     "tou_clamp_max",
     "tou_coast_max_minutes",
-    "tou_coast_rules",
     "tou_schedules",
 )
 
@@ -546,11 +544,35 @@ async def websocket_list_rooms(
                 vol.Optional("gate", default="always"): vol.In(TOU_BLOCK_GATES),
                 vol.Optional("side", default="both"): vol.In(TOU_BLOCK_SIDES),
                 vol.Required("value"): {
-                    vol.Required("mode"): vol.In(TOU_VALUE_MODES),
+                    vol.Required("mode"): vol.In(TOU_BLOCK_VALUE_MODES),
                     vol.Optional("temp"): vol.Coerce(float),
                     vol.Optional("direction"): vol.In(TOU_SHIFT_DIRECTIONS),
                     vol.Optional("delta"): vol.Coerce(float),
                 },
+            }
+        ],
+        # Tariff schedule rows edited on the device card: (tier) (action)
+        # (heat) (cool) (end). heat/cool carry a °C target for set/arrive and
+        # a Δ for raise/lower; a blank side skips that mode (see
+        # TouManager.row_records for the expansion into engine records).
+        vol.Optional("tou_overrides"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("name"): str,
+                vol.Optional("enabled", default=True): bool,
+                vol.Optional("tier", default="any"): vol.In([*TOU_TIERS, "any"]),
+                vol.Optional("edge", default="start"): vol.In(TOU_EDGES),
+                vol.Required("action"): vol.In(TOU_ROW_ACTIONS),
+                vol.Optional("heat"): vol.Any(None, vol.Coerce(float)),
+                vol.Optional("cool"): vol.Any(None, vol.Coerce(float)),
+                vol.Optional("until", default="tier_window"): vol.In(TOU_ROW_UNTILS),
+                vol.Optional("minutes", default=0): vol.Coerce(int),
+                vol.Optional("clock", default=""): str,
+                vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
+                vol.Optional("between", default=None): vol.Any(
+                    None,
+                    {vol.Required("from"): str, vol.Required("to"): str},
+                ),
             }
         ],
     }
@@ -602,6 +624,68 @@ async def websocket_save_room(
                 return
             if value.get("mode") == "shift" and value.get("direction") not in TOU_SHIFT_DIRECTIONS:
                 connection.send_error(msg["id"], "invalid_schedule_block_value", "'shift' blocks need a direction")
+                return
+
+    # Tariff schedule rows (device card): coherent per-action values and anchors
+    overrides = config.get("tou_overrides")
+    if overrides:
+        override_ids = [str(o.get("id", "")) for o in overrides]
+        if len(override_ids) != len(set(override_ids)):
+            connection.send_error(msg["id"], "duplicate_tou_override_id", "Tariff schedule IDs must be unique")
+            return
+        for o in overrides:
+            action = str(o.get("action") or "")
+            if action not in TOU_ROW_ACTIONS:
+                connection.send_error(msg["id"], "invalid_tou_override", f"Unknown action '{action}'")
+                return
+            sides = [v for v in (o.get("heat"), o.get("cool")) if v is not None]
+            if not sides and o.get("enabled", True):
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_override",
+                    "Tariff schedule rows need a heating or a cooling value — or disable the row",
+                )
+                return
+            if action in ("set", "arrive") and not all(
+                isinstance(v, (int, float)) and TOU_SCHEDULE_TEMP_MIN <= float(v) <= TOU_SCHEDULE_TEMP_MAX
+                for v in sides
+            ):
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_override",
+                    f"'{action}' needs temperatures {TOU_SCHEDULE_TEMP_MIN:g}-{TOU_SCHEDULE_TEMP_MAX:g} °C",
+                )
+                return
+            if action in ("raise", "lower") and not all(
+                isinstance(v, (int, float)) and TOU_SCHEDULE_SHIFT_MIN <= abs(float(v)) <= TOU_SCHEDULE_SHIFT_MAX
+                for v in sides
+            ):
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_override",
+                    f"'{action}' needs deltas {TOU_SCHEDULE_SHIFT_MIN:g}-{TOU_SCHEDULE_SHIFT_MAX:g} °C",
+                )
+                return
+            until = str(o.get("until") or "tier_window")
+            if until not in TOU_ROW_UNTILS:
+                connection.send_error(msg["id"], "invalid_tou_override", f"Unknown end '{until}'")
+                return
+            if action == "arrive" or until == "clock":
+                if not _hhmm_ok(str(o.get("clock") or "")):
+                    connection.send_error(msg["id"], "invalid_tou_override", "'clock' end needs 'HH:MM'")
+                    return
+            if until == "minutes" and not (
+                TOU_SCHEDULE_MINUTES_MIN <= int(o.get("minutes") or 0) <= TOU_SCHEDULE_MINUTES_MAX
+            ):
+                connection.send_error(
+                    msg["id"],
+                    "invalid_tou_override",
+                    f"Minute ends need {TOU_SCHEDULE_MINUTES_MIN}-{TOU_SCHEDULE_MINUTES_MAX} minutes",
+                )
+                return
+            between = o.get("between")
+            if between and not (_hhmm_ok(str(between.get("from") or "")) and _hhmm_ok(str(between.get("to") or ""))):
+                connection.send_error(msg["id"], "invalid_tou_override", "'between' needs 'HH:MM' values")
                 return
 
     if ("thermostats" in config or "acs" in config) and "devices" not in config:
@@ -843,9 +927,6 @@ async def websocket_get_settings(
     """Return global settings."""
     store = hass.data[DOMAIN]["store"]
     settings = store.get_settings()
-    # Bootstrap the schedule editor from coast rules that predate schedules.
-    if "tou_schedules" not in settings and settings.get("tou_coast_rules"):
-        settings = {**settings, "tou_schedules": TouManager.schedules(settings)}
     connection.send_result(msg["id"], {"settings": settings})
 
 
@@ -964,28 +1045,8 @@ async def websocket_get_settings(
         vol.Optional("tou_clamp_min"): vol.All(vol.Coerce(float), vol.Range(min=5, max=35)),
         vol.Optional("tou_clamp_max"): vol.All(vol.Coerce(float), vol.Range(min=5, max=40)),
         vol.Optional("tou_coast_max_minutes"): vol.All(vol.Coerce(int), vol.Range(min=30, max=1440)),
-        vol.Optional("tou_coast_rules"): [
-            {
-                vol.Required("id"): str,
-                vol.Required("name"): str,
-                vol.Optional("enabled", default=True): bool,
-                vol.Required("rooms"): vol.All([str], vol.Length(min=1)),
-                vol.Optional("trigger", default={}): {
-                    vol.Optional("from_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
-                    vol.Optional("to_tier", default=""): vol.Any("", vol.In(TOU_TIERS)),
-                },
-                vol.Optional("coast_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
-                vol.Optional("coast_heat_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
-                vol.Optional("coast_cool_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
-                vol.Required("end"): {
-                    vol.Required("mode"): vol.In(TOU_END_MODES),
-                    vol.Required("value"): vol.Any(vol.Coerce(int), str),
-                },
-                vol.Optional("post_hold", default="schedule"): vol.In(TOU_POST_HOLD_MODES),
-            }
-        ],
-        # Tariff schedules (unified chain): edge-anchored adjustments; saving
-        # them strips the superseded legacy editor data. guard is internal.
+        # Tariff schedules (unified chain): edge-anchored adjustments in the
+        # engine's native record format. guard is internal (legacy semantics).
         vol.Optional("tou_schedules"): [
             {
                 vol.Required("id"): str,
@@ -1005,6 +1066,7 @@ async def websocket_get_settings(
                     None,
                     {vol.Required("from"): str, vol.Required("to"): str},
                 ),
+                vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
                 vol.Optional("guard", default=False): bool,
                 vol.Required("value"): {
                     vol.Required("mode"): vol.In(TOU_VALUE_MODES),
@@ -1102,55 +1164,6 @@ async def websocket_save_settings(
             )
             return
 
-    # Validate Time-of-Use coast rules
-    rules = changes.get("tou_coast_rules")
-    if rules:
-        rule_ids = [r.get("id", "") for r in rules]
-        if len(rule_ids) != len(set(rule_ids)):
-            connection.send_error(msg["id"], "duplicate_tou_rule_id", "Coast rule IDs must be unique")
-            return
-        for r in rules:
-            if r.get("coast_temp") is None and r.get("coast_heat_temp") is None and r.get("coast_cool_temp") is None:
-                connection.send_error(
-                    msg["id"],
-                    "invalid_tou_coast_temp",
-                    "Coast rules need a heating or a cooling temperature — or disable the rule",
-                )
-                return
-            end = r.get("end", {})
-            mode, value = end.get("mode"), end.get("value")
-            if mode == "duration" and not (
-                isinstance(value, int) and TOU_COAST_DURATION_MIN_MINUTES <= value <= TOU_COAST_DURATION_MAX_MINUTES
-            ):
-                connection.send_error(
-                    msg["id"],
-                    "invalid_tou_coast_duration",
-                    f"Duration coast rules need a value of {TOU_COAST_DURATION_MIN_MINUTES}"
-                    f"-{TOU_COAST_DURATION_MAX_MINUTES} minutes",
-                )
-                return
-            if mode == "clock":
-                parts = str(value or "").split(":")
-                ok = (
-                    len(parts) >= 2
-                    and parts[0].isdigit()
-                    and parts[1].isdigit()
-                    and 0 <= int(parts[0]) <= 23
-                    and 0 <= int(parts[1]) <= 59
-                )
-                if not ok:
-                    connection.send_error(
-                        msg["id"], "invalid_tou_coast_clock", "Clock coast rules need a value of 'HH:MM'"
-                    )
-                    return
-            if mode == "tier_window" and value not in (*TOU_TIERS, ""):
-                connection.send_error(
-                    msg["id"],
-                    "invalid_tou_coast_tier",
-                    f"tier_window coast rules need one of {', '.join(TOU_TIERS)}, or '' for any change",
-                )
-                return
-
     windows = changes.get("tou_rate_windows")
     if windows:
         for w in windows:
@@ -1182,7 +1195,7 @@ async def websocket_save_settings(
                 )
                 return
 
-    # Tariff schedules: value/lead/clock/until/between checks, then supersede.
+    # Tariff schedules: value/lead/clock/until/between checks.
     schedules = changes.get("tou_schedules")
     if schedules is not None:
         sched_ids = [s.get("id", "") for s in schedules]
@@ -1212,13 +1225,16 @@ async def websocket_save_settings(
                 connection.send_error(msg["id"], "invalid_tou_schedule", "'between' needs 'HH:MM' values")
                 return
             value = s.get("value") or {}
-            if value.get("mode") == "set":
+            mode = value.get("mode")
+            if mode in ("set", "arrive"):
                 temp = value.get("temp")
                 if not isinstance(temp, (int, float)) or not (
                     TOU_SCHEDULE_TEMP_MIN <= float(temp) <= TOU_SCHEDULE_TEMP_MAX
                 ):
                     connection.send_error(
-                        msg["id"], "invalid_tou_schedule", f"'set' needs a temp {TOU_SCHEDULE_TEMP_MIN:g}+"
+                        msg["id"],
+                        "invalid_tou_schedule",
+                        f"'{mode}' needs a temp {TOU_SCHEDULE_TEMP_MIN:g}-{TOU_SCHEDULE_TEMP_MAX:g}",
                     )
                     return
             else:
@@ -1232,7 +1248,6 @@ async def websocket_save_settings(
                         msg["id"], "invalid_tou_schedule", "'shift' needs direction and a delta 0.5-8"
                     )
                     return
-        changes["tou_coast_rules"] = []  # schedules supersede the legacy editor
 
     settings = await store.async_save_settings(changes)
     connection.send_result(msg["id"], {"settings": settings})
@@ -1267,7 +1282,9 @@ async def websocket_tou_preview(
     store = hass.data[DOMAIN]["store"]
     coordinator = _get_coordinator(hass)
     manager = getattr(coordinator, "_tou_manager", None) if coordinator else None
-    preview = manager.preview(store.get_settings(), msg.get("area_id")) if manager is not None else None
+    preview = (
+        manager.preview(store.get_settings(), msg.get("area_id"), store.get_rooms()) if manager is not None else None
+    )
     connection.send_result(msg["id"], {"preview": preview or {"segments": [], "areas": {}, "records": {}}})
 
 

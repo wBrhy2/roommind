@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "1.9.0-beta.7"
+VERSION = "1.9.0-beta.8"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -271,18 +271,18 @@ TOU_LOOKAHEADS = ["auto", "calendar", "next_change_rate", "next_change", "none"]
 # Canonical weekday names for manual tariff windows (date.weekday() order).
 TOU_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
-# Coast-rule end modes and post-hold behavior.
-TOU_END_MODES = ["duration", "clock", "tier_window"]
-TOU_POST_HOLD_MODES = ["stay", "schedule"]
-
-# Tariff schedules (unified target chain): records anchored on tier-window
-# edges. A record targets exactly one side so a heating adjustment can never
-# command cooling and vice versa. Replaces coast rules, which migrate at read.
+# Coast-rule end modes and post-hold behavior were removed in beta.8: the
+# scheduling moved to per-room tariff-schedule rows (room["tou_overrides"]),
+# edited on the device card. Global ``tou_schedules`` records stay as the
+# engine's native format (API/advanced authoring).
 TOU_SIDES = ["heat", "cool"]
 TOU_EDGES = ["start", "end"]
 TOU_PHASES = ["before", "after"]
 TOU_UNTILS = ["minutes", "window", "next_change", "clock", "next_tier_change"]
-TOU_VALUE_MODES = ["set", "shift"]
+TOU_VALUE_MODES = ["set", "shift", "arrive"]
+# User schedule blocks (chain step 3) stay on the plain modes; "arrive" is a
+# tariff concept, its curve needs a tier boundary to anchor on.
+TOU_BLOCK_VALUE_MODES = ["set", "shift"]
 TOU_SHIFT_DIRECTIONS = ["raise", "lower"]
 TOU_SCHEDULE_MINUTES_MIN = 5
 TOU_SCHEDULE_MINUTES_MAX = 720
@@ -290,6 +290,23 @@ TOU_SCHEDULE_SHIFT_MIN = 0.5
 TOU_SCHEDULE_SHIFT_MAX = 8.0
 TOU_SCHEDULE_TEMP_MIN = 5.0
 TOU_SCHEDULE_TEMP_MAX = 40.0
+
+# Room tariff-schedule rows (device card): one row per tier anchor with an
+# optional heating and cooling value (blank side = the row skips that mode).
+# "arrive" is the decay-derived action: the room must coast to the value
+# exactly at ``clock`` with conditioning stopped from the tier boundary.
+TOU_ROW_ACTIONS = ["set", "raise", "lower", "arrive"]
+TOU_ROW_UNTILS = ["tier_window", "minutes", "clock"]
+
+# "arrive" curve amplification: floor(t) = t_out + (temp - t_out) *
+# e^(min(alpha * Δh, cap)). The cap bounds what an aggressive or not-yet
+# realistic learned loss rate can demand at the boundary; the target clamp
+# band applies on top.
+TOU_ARRIVAL_EXPONENT_CAP = 3.0
+# Learned-model confidence below which "arrive" rows hold the flat temperature
+# (today's coast behavior) instead of deriving a boundary temperature.
+TOU_ARRIVAL_MIN_CONFIDENCE = 0.5
+
 
 # Room-level user schedule blocks (chain step 3): time-of-day overrides that
 # outrank tariff machinery; "both" applies to whichever side(s) run.
@@ -304,8 +321,6 @@ DEFAULT_TOU_BOOST_DELTA = 2.0  # ULTRA_LOW: heat +δ / cool −δ (boost rooms o
 DEFAULT_TOU_CLAMP_MIN = 17.0  # final safety band on the adjusted target
 DEFAULT_TOU_CLAMP_MAX = 28.0
 DEFAULT_TOU_COAST_MAX_MINUTES = 480  # cap when a tier_window end is not in the timeline
-TOU_COAST_DURATION_MIN_MINUTES = 15
-TOU_COAST_DURATION_MAX_MINUTES = 720
 
 # How far ahead the tariff timeline is built (minutes). Covers the MPC's
 # longest pre-heat lead (12 h) plus margin.

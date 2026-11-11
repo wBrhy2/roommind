@@ -90,7 +90,7 @@ def _migrate_room(room: dict) -> dict:
     return room
 
 
-_ORPHAN_SETTINGS_KEYS = ("heating_threshold", "cooling_threshold")
+_ORPHAN_SETTINGS_KEYS = ("heating_threshold", "cooling_threshold", "tou_coast_rules")
 
 
 class RoomMindStore:
@@ -297,6 +297,7 @@ class RoomMindStore:
             "tou_max_boost": config.get("tou_max_boost", None),
             "tou_boost_unoccupied": config.get("tou_boost_unoccupied", False),
             "schedule_blocks": config.get("schedule_blocks", []),
+            "tou_overrides": config.get("tou_overrides", []),
         }
         _single_temps_to_cool_side(room, config, room["climate_mode"])
         # Directional device sync for new rooms (truthiness check, not just presence)

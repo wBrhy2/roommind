@@ -26,8 +26,8 @@ select is kept in settings, just ignored:
   `input_boolean`/`binary_sensor` per tier.
 
 **2. How far RoomMind can see into the future** (this is what enables
-pre-conditioning and coast rules — with no future view, only tier shaping of
-the currently active tier applies):
+pre-conditioning and the tariff schedule rows — with no future view, only tier
+shaping of the currently active tier applies):
 
 - **Tariff calendars** (recommended) — bind up to four `calendar.*` entities,
   one per tier. Their events give RoomMind the *entire future tariff
@@ -104,9 +104,9 @@ inverter/meter can publish the surplus state instead of a tariff:
   empty — the whole point is that the sun shines whether or not you are in
   the room.
 - When the surplus ends (clouds, battery full, feed-in capped), the tier
-  falls back and the stored heat carries the house into the evening; a coast
-  rule ending **Any tier change** or at a wall-clock time can hold it
-  through the peak that follows.
+  falls back and the stored heat carries the house into the evening; a card
+  schedule row holding to the **next period change** or to a wall-clock time
+  can keep it through the peak that follows.
 - Predictable patterns — "solar surplus roughly 10:00–15:00 in spring" — can
   be expressed with a calendar on the ultra-low tier, and the MPC will plan
   the soak-up around its forecast; without calendar entities, the same
@@ -154,46 +154,75 @@ costs more, so the optimizer starts it during the cheap window before the
 boundary and lets the learned room model coast through the start of the peak.
 Turn it off if you only want the plain tier setback/boost.
 
-## Coast rules
+## Tariff schedule (device card)
 
-A coast rule turns a tier *change* into a scheduled temperature event, the
-same way your own automations did: when the tariff flips (say ultra-low to
-peak), the room stops conditioning and drifts to its **coast temperatures** —
-one for the heating side, one for the cooling side — holding them for as long
-as the rule says, then either returns to the schedule or keeps holding.
+Scheduling by time of use happens on the room's device card, under its
+Time-of-Use section. Each row is a temporary target override anchored on a
+tariff *period* instead of the clock: pick a tier and whether the row fires
+when the period **starts** or **ends**, choose an action and a heating and/or
+cooling value, and say how long the hold lasts. The normal schedule and every
+other rule keep controlling the room — a row only bends the target while it
+holds.
 
-For every matching change in the timeline the rule computes a window:
+For every matching change in the timeline the row computes a window:
 
-- **Trigger**: which change starts it (`from tier → to tier`, either side may
-  stay "Any tier"), across the rooms you tick.
-- **Coast temperatures**: a heating and a cooling target, each optional. A
-  blank side means the rule is skipped in that mode — a heating-only rule
-  leaves cooling entirely alone (plain tier shaping still applies there).
-  A set value is a limit held for the whole window, never a point the room
-  is forced to: heating drifts *down to but not below* it, cooling *up to
-  but not above* it.
-- **Coast ends after**: a fixed duration (change + X minutes), at a wall-clock
-  time (e.g. `07:30` — the departure time the comfort must last until), at
-  the next change into a chosen tier (the cheap window that ends the peak;
-  with a fallback to the **Maximum coast duration** if that tier never arrives
-  in the visible horizon), or at **Any tier change** — the next boundary no
-  matter which tier it leads into, which suits tariffs whose future beyond
-  one step is unpredictable.
-- **When the hold ends**: `Return to schedule` hands the target back (the MPC
-  then treats the rise like any scheduled block and pre-heats toward it), or
-  `Keep holding` holds the coast temperature until the next tier change.
+- **Time of use**: which tier's boundary starts the row (`Any period change`
+  works too), optionally restricted to weekdays and to a wall-clock range the
+  change itself must fall inside.
+- **Action**: `Override target temperature to`, `Increase target
+  temperature temporarily by`, `Decrease target temperature temporarily by`,
+  or `Reach target temperature by time` (see below).
+- **Heating / Cooling**: one value per mode, each optional. A blank side
+  means the row is skipped in that mode — a heating-only row leaves cooling
+  entirely alone (plain tier shaping still applies there).
+- **Holds**: until the next period change, for a fixed number of minutes, or
+  until a wall-clock time.
 
 Because the window is part of the MPC horizon, the optimizer decides *when* to
-start charging so the room arrives warm at the coast boundary and how much of
-the peak it can coast through — the boost hours you once hard-coded
-("02:00 in the loft") become a consequence of the tariff timeline and the
-learned room model. During a coast window the schedule is *not* silently
-abandoned: any schedule target above the coast temperature is ignored while
-the window holds, and everything else (override, vacation, windows, mold,
-compressor protection) keeps its priority.
+start charging so the room arrives at the hold target by the boundary and how
+much of the expensive window it can coast through — the boost hours you once
+hard-coded ("02:00 in the loft") become a consequence of the tariff timeline
+and the learned room model. During a row window the schedule is *not* silently
+abandoned: any schedule target on the wrong side of the row value is ignored
+while the window holds, and everything else (manual override, vacation,
+windows, mold, compressor protection) keeps its priority.
 
-Cooling coasts the mirrored way: pre-cool in a cheap window, stop at the
-boundary, and let the room drift up through the peak.
+Cooling mirrors heating: relax the cooling target during the peak and let the
+room drift up, or pre-cool in a cheap window.
+
+### Reach target temperature by time
+
+The decay-derived action for the classic "heat during the cheap window, arrive
+comfortable at the door" case. Example: ultra-low ends at 07:00, you leave at
+09:00 and the room must be at 20 °C when you go — but heating should *stop* at
+07:00, not trickle through the morning. The row says `(ultra-low · ends)`
+`(reach 20 °C by 09:00)` `(heating 20 °C)` and RoomMind derives the
+temperature the room must already have at the boundary from your learned room
+model:
+
+    needed(t) = outdoor + (20 − outdoor) · e^(α · (09:00 − t))
+
+with α the room's learned heat-loss rate. A room losing a degree every ten
+hours against a −2 °C morning needs roughly 21.4 °C at 07:00 to coast to
+exactly 20 °C by 09:00. That derived value is the *indirect* 07:00 target —
+you never schedule it. The MPC replans it every cycle against the forecast,
+so the pre-charge lands in the cheap window and the schedule series stays
+continuous at the arrival instant. If the room decays faster than the model
+predicted, small top-ups are allowed rather than arriving cold: comfort at
+09:00 is the promise, zero energy in between is the best effort.
+
+While the room's thermal model is still immature the row degrades gracefully
+to holding the flat target (classic coast behavior), and the card says so.
+
+### Advanced global records
+
+The engine's native record format (`tou_schedules`) stays available through
+the websocket API for edge cases the card does not expose (a separate lead
+window before the boundary, ending on the change *into* a specific tier with
+a maximum-hold fallback, or the one-way guard semantics of the old coast
+rules). Coast rules themselves were removed in 1.9.0-beta.8; the feature was
+beta-only, so leftover stored rules are dropped on load.
+
 
 ## Reading it back
 
@@ -215,6 +244,10 @@ tier timeline; the panel shows the active tier.
    clamp 17–28 °C, price weighting on.
 4. Rooms: `Setback + boost` for the loft/boys/dining rooms that should
    pre-charge overnight; `Setback only` where comfort during peaks matters.
-5. Coast rule "Evening peak push-out": trigger off→peak, heating coast
-   18 °C (cooling blank), end `tier_window → off` (cap 480 min), post-hold
-   `Return to schedule`.
+5. Card schedule row "Evening peak push-out": (Peak · starts) (Override target
+   temperature to) heating 18 °C (cooling blank), holds until the next period
+   change.
+6. Card schedule row "Warm for the door": (Ultra-low · ends) (Reach target
+   temperature by time) heating 20 °C, arrive by 09:00 — RoomMind derives the
+   boundary temperature from the learned decay so heating stops when the
+   cheap window ends and the room is exactly 20 °C at departure.

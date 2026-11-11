@@ -115,31 +115,39 @@ export type TouTierSource = "auto" | "period" | "rate" | "flags";
  * planning). */
 export type TouLookahead = "auto" | "calendar" | "next_change_rate" | "next_change" | "none";
 
-/** How a coast window ends after its triggering tier change. */
-export type TouCoastEndMode = "duration" | "clock" | "tier_window";
+/** What an override row does to the resolved schedule target. "arrive" is the
+ * decay-derived action: the room must coast to the value exactly at the
+ * arrival clock time with conditioning stopped from the tier boundary; until
+ * the thermal model is learned the row holds the flat temperature. */
+export type TouOverrideAction = "set" | "raise" | "lower" | "arrive";
 
-/** What happens when the coast hold ends. */
-export type TouPostHold = "stay" | "schedule";
+/** How long a non-arrive override row holds after its tier boundary. */
+export type TouOverrideUntil = "tier_window" | "minutes" | "clock";
 
-export interface TouCoastEnd {
-  mode: TouCoastEndMode;
-  /** minutes | "HH:MM" | tier */
-  value: number | string;
-}
-
-export interface TouCoastRule {
+/** One tariff-schedule row authored on the device card: (tier) (edge)
+ * (action) (heat) (cool) (end). A blank side skips that mode. Backend
+ * expansion: TouManager.row_records. */
+export interface TouOverride {
   id: string;
   name: string;
   enabled: boolean;
-  rooms: string[];
-  trigger: { from_tier: string; to_tier: string };
-  /** Coast target per mode; blank/undefined = rule skipped in that mode.
-   * Legacy rules carry only coast_temp, which seeds both sides. */
-  coast_temp?: number | null;
-  coast_heat_temp?: number | null;
-  coast_cool_temp?: number | null;
-  end: TouCoastEnd;
-  post_hold: TouPostHold;
+  /** Which tariff tier's boundary anchors the row; "any" = every change. */
+  tier: TouTier | "any";
+  /** Whether the row fires when the tier starts or when it ends. */
+  edge: "start" | "end";
+  action: TouOverrideAction;
+  /** °C target for set/arrive, Δ°C for raise/lower; null/undefined = skip. */
+  heat?: number | null;
+  cool?: number | null;
+  until: TouOverrideUntil;
+  /** Duration when until = "minutes". */
+  minutes?: number;
+  /** End time "HH:MM" when until = "clock", or the arrival time for arrive. */
+  clock?: string;
+  /** Restrict to boundaries on these weekdays; empty = every day. */
+  days?: string[];
+  /** Restrict to boundaries whose local time falls in this clock range. */
+  between?: { from: string; to: string } | null;
 }
 
 export interface TouCalendarBinding {
@@ -234,6 +242,8 @@ export interface RoomConfig {
   tou_mode?: TouMode;
   tou_max_boost?: number | null;
   tou_boost_unoccupied?: boolean;
+  /** Tariff-schedule rows edited on the device card. */
+  tou_overrides?: TouOverride[];
   live?: RoomLiveData;
 }
 
@@ -301,7 +311,6 @@ export interface GlobalSettings {
   tou_clamp_min?: number;
   tou_clamp_max?: number;
   tou_coast_max_minutes?: number;
-  tou_coast_rules?: TouCoastRule[];
   room_order?: string[];
   group_by_floor?: boolean;
   boost_applied_at?: Record<string, number>;

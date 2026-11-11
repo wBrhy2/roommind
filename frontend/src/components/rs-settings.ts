@@ -14,7 +14,6 @@ import type {
   RoomWithoutArea,
   TouCalendarBinding,
   TouRateWindow,
-  TouCoastRule,
 } from "../types";
 import { localize } from "../utils/localize";
 import { fireSaveStatus } from "../utils/events";
@@ -95,8 +94,6 @@ export class RsSettings extends LitElement {
   @state() private _touBoostDelta = 2;
   @state() private _touClampMin = 17;
   @state() private _touClampMax = 28;
-  @state() private _touCoastMaxMinutes = 480;
-  @state() private _touCoastRules: TouCoastRule[] = [];
   @state() private _coilDryEnabled = false;
   @state() private _coilDryMinutes = 20;
   @state() private _coilDryMode: "fan_only" | "dry" = "fan_only";
@@ -188,14 +185,6 @@ export class RsSettings extends LitElement {
       this._touBoostDelta = s.tou_boost_delta ?? 2;
       this._touClampMin = s.tou_clamp_min ?? 17;
       this._touClampMax = s.tou_clamp_max ?? 28;
-      this._touCoastMaxMinutes = s.tou_coast_max_minutes ?? 480;
-      this._touCoastRules = (s.tou_coast_rules ?? []).map((r) => ({
-        ...r,
-        coast_heat_temp:
-          "coast_heat_temp" in r ? (r.coast_heat_temp ?? null) : (r.coast_temp ?? null),
-        coast_cool_temp:
-          "coast_cool_temp" in r ? (r.coast_cool_temp ?? null) : (r.coast_temp ?? null),
-      }));
       this._coilDryEnabled = s.coil_dry_enabled ?? false;
       this._coilDryMinutes = s.coil_dry_minutes ?? 20;
       this._coilDryMode = s.coil_dry_mode ?? "fan_only";
@@ -377,11 +366,6 @@ export class RsSettings extends LitElement {
           .touBoostDelta=${this._touBoostDelta}
           .touClampMin=${this._touClampMin}
           .touClampMax=${this._touClampMax}
-          .touCoastMaxMinutes=${this._touCoastMaxMinutes}
-          .touCoastRules=${this._touCoastRules}
-          .roomAreas=${Object.fromEntries(
-            Object.entries(this.rooms).map(([id, r]) => [id, r.display_name || id]),
-          )}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-tou>
       </rs-settings-panel>
@@ -586,8 +570,6 @@ export class RsSettings extends LitElement {
         tou_boost_delta: this._touBoostDelta,
         tou_clamp_min: this._touClampMin,
         tou_clamp_max: this._touClampMax,
-        tou_coast_max_minutes: this._touCoastMaxMinutes,
-        tou_coast_rules: this._touCoastRules.filter((r) => r.rooms.length > 0),
       });
       // Toggled again while the request was out: stays dirty, the queued save sends it.
       if (this._climateControlActive === sentClimateControl) this._climateControlDirty = false;

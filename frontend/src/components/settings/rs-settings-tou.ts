@@ -1,6 +1,8 @@
 /**
- * rs-settings-tou – Time-of-Use tariff awareness: source bindings, tier
- * shaping defaults, and coast rules (multi-room, compressor-group style).
+ * rs-settings-tou – Time-of-Use tariff awareness: source bindings and tier
+ * shaping defaults. Tariff *scheduling* lives on the device card
+ * (rs-tou-section): the rooms' `tou_overrides` rows anchor actions to the
+ * tiers defined here.
  *
  * The tariff source is structured as two exclusive choices so the panel only
  * shows the fields the selected source actually needs:
@@ -9,7 +11,7 @@
  *   mirrors the manager cascade. Selecting a radio writes an explicit
  *   ``tou_tier_source``; "auto" (never touched) derives from what is bound.
  * * "Plan the tariff future from" — calendars, next-change sensor, or none;
- *   drives whether pre-conditioning/coast rules can see beyond the current
+ *   drives whether pre-conditioning/schedule rows can see beyond the current
  *   tier (``tou_lookahead``).
  *
  * Bound-but-unselected sources stay in settings (ignored by the manager).
@@ -23,7 +25,6 @@ import { customElement, property, state } from "lit/decorators.js";
 import type {
   HomeAssistant,
   TouCalendarBinding,
-  TouCoastRule,
   TouLookahead,
   TouRateWindow,
   TouTier,
@@ -55,7 +56,6 @@ const WEEKDAYS = [
   { value: "saturday", abbr: "Sa", key: "sat" },
   { value: "sunday", abbr: "Su", key: "sun" },
 ] as const;
-const END_MODES = ["duration", "clock", "tier_window"] as const;
 const CLOSE_ICON =
   "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z";
 
@@ -81,10 +81,6 @@ export class RsSettingsTou extends LitElement {
   @property({ type: Number }) public touBoostDelta = 2;
   @property({ type: Number }) public touClampMin = 17;
   @property({ type: Number }) public touClampMax = 28;
-  @property({ type: Number }) public touCoastMaxMinutes = 480;
-  @property({ type: Array }) public touCoastRules: TouCoastRule[] = [];
-  /** area_id -> display name, for the rule room checkboxes. */
-  @property({ attribute: false }) public roomAreas: Record<string, string> = {};
 
   @state() private _fineTuneOpen = false;
 
@@ -488,20 +484,8 @@ export class RsSettingsTou extends LitElement {
               </div>
 
               ${
-                look !== "none" || this.touCoastRules.length > 0
-                  ? html`
-                      <div class="section-label">${localize("tou.coast_title", l)}</div>
-                      <div class="hint">${localize("tou.coast_intro", l)}</div>
-                      ${
-                        this.touCoastRules.length === 0
-                          ? html`<div class="no-rules">${localize("tou.no_rules", l)}</div>`
-                          : this.touCoastRules.map((rule, idx) => this._renderRule(rule, idx))
-                      }
-                      <ha-button class="add-button" @click=${this._addRule}>
-                        <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
-                        ${localize("tou.add_rule", l)}
-                      </ha-button>
-                    `
+                look !== "none"
+                  ? html` <div class="hint">${localize("tou.card_schedule_hint", l)}</div> `
                   : nothing
               }
 
@@ -718,215 +702,6 @@ export class RsSettingsTou extends LitElement {
     `;
   }
 
-  private _renderRule(rule: TouCoastRule, idx: number) {
-    const l = this.hass.language;
-    const tierOptions = [
-      { value: ANY_TIER, label: localize("tou.tier_any", l) },
-      ...TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) })),
-    ];
-    const update = (patch: Partial<TouCoastRule>) => {
-      const updated = [...this.touCoastRules];
-      updated[idx] = { ...updated[idx], ...patch };
-      this._fire("touCoastRules", updated);
-    };
-    const pickTierFilter = (label: string, current: string, onPick: (v: string) => void) =>
-      html`<ha-select
-        .label=${label}
-        .value=${current || ANY_TIER}
-        .options=${tierOptions}
-        @selected=${(e: Event) => {
-          const v = getSelectValue(e);
-          if (v !== null) onPick(v === ANY_TIER ? "" : v);
-        }}
-        @closed=${(e: Event) => e.stopPropagation()}
-        fixedMenuPosition
-        style="width:100%"
-      ></ha-select>`;
-    const range = tempRange(5, 35, this.hass);
-    return html`
-      <div class="rule-card">
-        <ha-textfield
-          .value=${rule.name}
-          .label=${localize("tou.rule_name", l)}
-          @change=${(e: Event) => update({ name: (e.target as HTMLInputElement).value })}
-        ></ha-textfield>
-
-        <div class="section-label">${localize("tou.rule_rooms", l)}</div>
-        <div class="rule-rooms">
-          ${Object.entries(this.roomAreas).map(
-            ([areaId, name]) =>
-              html`<label class="rule-room">
-                <input
-                  type="checkbox"
-                  .checked=${rule.rooms.includes(areaId)}
-                  @change=${(e: Event) => {
-                    const checked = (e.target as HTMLInputElement).checked;
-                    const rooms = checked
-                      ? [...rule.rooms, areaId]
-                      : rule.rooms.filter((r) => r !== areaId);
-                    update({ rooms });
-                  }}
-                />
-                <span>${name}</span>
-              </label>`,
-          )}
-        </div>
-
-        <div class="tier-grid">
-          ${pickTierFilter(localize("tou.rule_from", l), rule.trigger.from_tier, (v) =>
-            update({ trigger: { ...rule.trigger, from_tier: v } }),
-          )}
-          ${pickTierFilter(localize("tou.rule_to", l), rule.trigger.to_tier, (v) =>
-            update({ trigger: { ...rule.trigger, to_tier: v } }),
-          )}
-        </div>
-
-        <div class="tier-grid shaping-grid">
-          <div class="col-header">${localize("tou.col_heating", l)}</div>
-          <div class="col-header">${localize("tou.col_cooling", l)}</div>
-          <ha-textfield
-            type="number"
-            .value=${rule.coast_heat_temp == null ? "" : String(toDisplay(rule.coast_heat_temp, this.hass))}
-            .label=${localize("tou.rule_coast_temp", l)}
-            .suffix=${tempUnit(this.hass)}
-            min=${range.min}
-            max=${range.max}
-            step=${tempStep(this.hass)}
-            @change=${(e: Event) => {
-              const raw = (e.target as HTMLInputElement).value.trim();
-              if (raw === "") update({ coast_heat_temp: null });
-              else {
-                const v = parseFloat(raw);
-                if (!isNaN(v)) update({ coast_heat_temp: toCelsius(v, this.hass) });
-              }
-            }}
-          ></ha-textfield>
-          <ha-textfield
-            type="number"
-            .value=${rule.coast_cool_temp == null ? "" : String(toDisplay(rule.coast_cool_temp, this.hass))}
-            .label=${localize("tou.rule_coast_temp", l)}
-            .suffix=${tempUnit(this.hass)}
-            min=${range.min}
-            max=${range.max}
-            step=${tempStep(this.hass)}
-            @change=${(e: Event) => {
-              const raw = (e.target as HTMLInputElement).value.trim();
-              if (raw === "") update({ coast_cool_temp: null });
-              else {
-                const v = parseFloat(raw);
-                if (!isNaN(v)) update({ coast_cool_temp: toCelsius(v, this.hass) });
-              }
-            }}
-          ></ha-textfield>
-        </div>
-        <div class="hint">${localize("tou.rule_coast_note", l)}</div>
-        <ha-select
-          .label=${localize("tou.rule_end_mode", l)}
-          .value=${rule.end.mode}
-          .options=${END_MODES.map((m) => ({ value: m, label: localize(`tou.end.${m}`, l) }))}
-          @selected=${(e: Event) => {
-            const v = getSelectValue(e);
-            if (v !== null)
-              update({ end: { mode: v as (typeof END_MODES)[number], value: rule.end.value } });
-          }}
-          @closed=${(e: Event) => e.stopPropagation()}
-          fixedMenuPosition
-          style="width:100%;margin-top:4px"
-        ></ha-select>
-
-        <div class="field-block">
-          ${
-            rule.end.mode === "duration"
-              ? html`<ha-textfield
-                  type="number"
-                  .value=${String(rule.end.value)}
-                  .label=${localize("tou.rule_end_minutes", l)}
-                  min="15"
-                  max="720"
-                  step="5"
-                  @change=${(e: Event) => {
-                    const v = parseInt((e.target as HTMLInputElement).value, 10);
-                    if (!isNaN(v)) update({ end: { ...rule.end, value: v } });
-                  }}
-                ></ha-textfield>`
-              : nothing
-          }
-          ${
-            rule.end.mode === "clock"
-              ? html`<ha-textfield
-                  .value=${String(rule.end.value)}
-                  .label=${localize("tou.rule_end_clock", l)}
-                  pattern="[0-9]{1,2}:[0-9]{2}"
-                  @change=${(e: Event) =>
-                    update({ end: { ...rule.end, value: (e.target as HTMLInputElement).value } })}
-                ></ha-textfield>`
-              : nothing
-          }
-          ${
-            rule.end.mode === "tier_window"
-              ? html`<ha-select
-                  .label=${localize("tou.rule_end_tier", l)}
-                  .value=${rule.end.value === "" ? ANY_TIER : String(rule.end.value)}
-                  .options=${[
-                    { value: ANY_TIER, label: localize("tou.rule_end_tier_any", l) },
-                    ...TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) })),
-                  ]}
-                  @selected=${(e: Event) => {
-                    const v = getSelectValue(e);
-                    if (v !== null)
-                      update({ end: { ...rule.end, value: v === ANY_TIER ? "" : v } });
-                  }}
-                  @closed=${(e: Event) => e.stopPropagation()}
-                  fixedMenuPosition
-                  style="width:100%"
-                ></ha-select>`
-              : nothing
-          }
-          <div class="hint">${localize("tou.rule_end_hint", l)}</div>
-        </div>
-
-        <ha-select
-          .label=${localize("tou.rule_post_hold", l)}
-          .value=${rule.post_hold}
-          .options=${(["schedule", "stay"] as const).map((m) => ({
-            value: m,
-            label: localize(`tou.post_hold.${m}`, l),
-          }))}
-          @selected=${(e: Event) => {
-            const v = getSelectValue(e);
-            if (v !== null) update({ post_hold: v as "stay" | "schedule" });
-          }}
-          @closed=${(e: Event) => e.stopPropagation()}
-          fixedMenuPosition
-          style="width:100%"
-        ></ha-select>
-        <div class="hint">${localize("tou.rule_post_hold_hint", l)}</div>
-
-        <rs-toggle-row
-          .label=${localize("tou.rule_enabled", l)}
-          .checked=${rule.enabled}
-          @toggle-changed=${(e: CustomEvent) => update({ enabled: e.detail as boolean })}
-        ></rs-toggle-row>
-
-        <div class="delete-row">
-          <rs-confirm-button
-            .label=${localize("tou.rule_delete", l)}
-            .confirmMessage=${localize("tou.rule_delete_confirm", l).replace(
-              "{name}",
-              rule.name || `#${idx + 1}`,
-            )}
-            destructive
-            @confirmed=${() =>
-              this._fire(
-                "touCoastRules",
-                this.touCoastRules.filter((_, i) => i !== idx),
-              )}
-          ></rs-confirm-button>
-        </div>
-      </div>
-    `;
-  }
-
   private _addCalendar() {
     this._fire("touCalendarEntities", [
       ...this.touCalendarEntities,
@@ -1004,23 +779,6 @@ export class RsSettingsTou extends LitElement {
           )}
       ></ha-icon-button>
     </div>`;
-  }
-
-  private _addRule() {
-    this._fire("touCoastRules", [
-      ...this.touCoastRules,
-      {
-        id: self.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        name: "",
-        enabled: true,
-        rooms: [],
-        trigger: { from_tier: "ultra_low", to_tier: "peak" },
-        coast_heat_temp: 18,
-        coast_cool_temp: null,
-        end: { mode: "tier_window", value: "off" },
-        post_hold: "schedule",
-      },
-    ]);
   }
 
   private _fire(key: string, value: unknown) {

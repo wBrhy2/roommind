@@ -44,6 +44,7 @@ from .const import (
     OVERRIDE_TURN_ON_REFRESH_DELAY_S,
     SCHEDULE_STATE_ON,
     THERMAL_SAVE_CYCLES,
+    TOU_ARRIVAL_MIN_CONFIDENCE,
     UPDATE_INTERVAL,
     TargetTemps,
     build_override_live,
@@ -786,6 +787,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             room_vacant=occupancy_vacant,
             presence_away=presence_away,
             mold_active=mold_prevention_active_room and mold_prevention_temp_delta > 0,
+            decay=self._tou_decay_params(area_id),
         )
         targets = self._resolve_target_temps(
             room, settings, schedule_blocks, schedule_entity_id, room_vacant=occupancy_vacant
@@ -2002,6 +2004,24 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         from .utils.presence_utils import is_presence_away
 
         return is_presence_away(self.hass, room, settings)  # all tracked persons are away
+
+    def _tou_decay_params(self, area_id: str) -> tuple[float, float] | None:
+        """Return (alpha_per_hour, outdoor_C) for "arrive" curves, or None.
+
+        None while the outdoor temperature is unavailable or the room's
+        thermal model is too young to trust a back-cast; the tariff manager
+        then holds the flat target (classic coast behavior) instead of
+        deriving the temperature the room must have at the coast boundary.
+        """
+        t_out = self.outdoor_temp_effective
+        if t_out is None:
+            return None
+        if self._model_manager.get_confidence(area_id) < TOU_ARRIVAL_MIN_CONFIDENCE:
+            return None
+        model = self._model_manager.get_model(area_id)
+        if model.C <= 0:
+            return None
+        return (model.U / model.C, t_out)
 
     def _get_active_schedule_index(self, room: dict) -> int:
         """Return the index of the active schedule in room['schedules'].

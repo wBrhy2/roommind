@@ -3306,15 +3306,19 @@ async def test_save_settings_tou_valid(ws_hass, store, connection):
         "tou_rate_entity": "sensor.hydro_one_rate",
         "tou_next_change_tier": "",
         "tou_calendar_entities": [{"entity_id": "calendar.ultou_peak", "tier": "peak"}],
-        "tou_coast_rules": [
+        "tou_schedules": [
             {
-                "id": "peak-coast",
+                "id": "peak-coast-heat",
                 "name": "Coast through peak",
                 "rooms": ["living_room"],
-                "trigger": {"from_tier": "ultra_low", "to_tier": "peak"},
-                "coast_temp": 18.0,
-                "end": {"mode": "duration", "value": 120},
-                "post_hold": "schedule",
+                "side": "heat",
+                "tier": "peak",
+                "edge": "start",
+                "phase": "after",
+                "until": "minutes",
+                "minutes": 120,
+                "days": ["monday"],
+                "value": {"mode": "set", "temp": 18.0},
             }
         ],
     }
@@ -3326,126 +3330,152 @@ async def test_save_settings_tou_valid(ws_hass, store, connection):
     assert settings["tou_tier_source"] == "period"
     assert settings["tou_lookahead"] == "calendar"
     assert settings["tou_next_change_tier"] == ""
-    assert settings["tou_coast_rules"][0]["end"] == {"mode": "duration", "value": 120}
+    assert settings["tou_schedules"][0]["minutes"] == 120
+    assert settings["tou_schedules"][0]["days"] == ["monday"]
 
 
 @pytest.mark.asyncio
-async def test_save_settings_tou_duplicate_rule_id(ws_hass, store, connection):
-    """Coast rule IDs must be unique."""
-    await store.async_load()
-
-    rule = {
-        "id": "r",
-        "name": "x",
-        "rooms": ["living_room"],
-        "trigger": {"from_tier": "ultra_low", "to_tier": "peak"},
-        "coast_temp": 18.0,
-        "end": {"mode": "duration", "value": 120},
-        "post_hold": "schedule",
-    }
-    msg = {"id": 61, "type": "roommind/settings/save", "tou_coast_rules": [rule, dict(rule)]}
-    await _save_settings(ws_hass, connection, msg)
-
-    connection.send_error.assert_called_once()
-    assert connection.send_error.call_args[0][1] == "duplicate_tou_rule_id"
-
-
-@pytest.mark.asyncio
-async def test_save_settings_tou_duration_out_of_range(ws_hass, store, connection):
-    """A duration coast rule needs a sane minute value."""
+async def test_save_settings_tou_ignores_coast_rules(ws_hass, store, connection):
+    """The removed coast-rule field is silently ignored by the settings save."""
     await store.async_load()
 
     msg = {
-        "id": 62,
+        "id": 61,
         "type": "roommind/settings/save",
-        "tou_coast_rules": [
-            {
-                "id": "r",
-                "name": "x",
-                "rooms": ["living_room"],
-                "trigger": {"from_tier": "", "to_tier": "peak"},
-                "coast_temp": 18.0,
-                "end": {"mode": "duration", "value": 3},
-                "post_hold": "schedule",
-            }
-        ],
+        "tou_enabled": True,
+        "tou_coast_rules": [{"id": "x", "name": "legacy", "coast_temp": 18.0}],
     }
     await _save_settings(ws_hass, connection, msg)
 
-    connection.send_error.assert_called_once()
-    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_duration"
+    connection.send_result.assert_called_once()
+    settings = connection.send_result.call_args[0][1]["settings"]
+    assert "tou_coast_rules" not in settings
+    assert settings["tou_enabled"] is True
 
 
 @pytest.mark.asyncio
-async def test_save_settings_tou_clock_format(ws_hass, store, connection):
-    """A clock coast rule needs an HH:MM value."""
+async def test_save_settings_tou_duplicate_schedule_id(ws_hass, store, connection):
+    """Tariff schedule IDs must be unique."""
+    await store.async_load()
+
+    rec = {
+        "id": "r",
+        "name": "x",
+        "rooms": ["living_room"],
+        "side": "heat",
+        "tier": "peak",
+        "until": "minutes",
+        "minutes": 120,
+        "value": {"mode": "set", "temp": 18.0},
+    }
+    msg = {"id": 62, "type": "roommind/settings/save", "tou_schedules": [rec, dict(rec)]}
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "duplicate_tou_schedule_id"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_schedule_minutes_out_of_range(ws_hass, store, connection):
+    """A minutes-ended schedule record needs a sane duration."""
     await store.async_load()
 
     msg = {
         "id": 63,
         "type": "roommind/settings/save",
-        "tou_coast_rules": [
+        "tou_schedules": [
             {
                 "id": "r",
                 "name": "x",
                 "rooms": ["living_room"],
-                "trigger": {"from_tier": "", "to_tier": "peak"},
-                "coast_temp": 18.0,
-                "end": {"mode": "clock", "value": "25:99"},
-                "post_hold": "schedule",
+                "side": "heat",
+                "tier": "peak",
+                "until": "minutes",
+                "minutes": 3,
+                "value": {"mode": "set", "temp": 18.0},
             }
         ],
     }
     await _save_settings(ws_hass, connection, msg)
 
     connection.send_error.assert_called_once()
-    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_clock"
+    assert connection.send_error.call_args[0][1] == "invalid_tou_schedule"
 
 
 @pytest.mark.asyncio
-async def test_save_settings_tou_tier_window_value(ws_hass, store, connection):
-    """A tier-window coast rule must wait for a known tier."""
+async def test_save_settings_tou_schedule_clock_format(ws_hass, store, connection):
+    """A clock-ended schedule record needs an HH:MM value."""
     await store.async_load()
 
     msg = {
         "id": 64,
         "type": "roommind/settings/save",
-        "tou_coast_rules": [
+        "tou_schedules": [
             {
                 "id": "r",
                 "name": "x",
                 "rooms": ["living_room"],
-                "trigger": {"from_tier": "", "to_tier": "peak"},
-                "coast_temp": 18.0,
-                "end": {"mode": "tier_window", "value": "weekend"},
-                "post_hold": "schedule",
+                "side": "heat",
+                "tier": "peak",
+                "until": "clock",
+                "clock": "25:99",
+                "value": {"mode": "set", "temp": 18.0},
             }
         ],
     }
     await _save_settings(ws_hass, connection, msg)
 
     connection.send_error.assert_called_once()
-    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_tier"
+    assert connection.send_error.call_args[0][1] == "invalid_tou_schedule"
 
 
 @pytest.mark.asyncio
-async def test_save_settings_tou_any_tier_window(ws_hass, store, connection):
-    """A tier_window coast rule may wait for ANY change (value '')."""
+async def test_save_settings_tou_schedule_next_tier_change_needs_tier(ws_hass, store, connection):
+    """A next_tier_change record must name a known tier."""
     await store.async_load()
 
     msg = {
         "id": 65,
         "type": "roommind/settings/save",
+        "tou_schedules": [
+            {
+                "id": "r",
+                "name": "x",
+                "rooms": ["living_room"],
+                "side": "heat",
+                "tier": "peak",
+                "until": "next_tier_change",
+                "until_tier": "weekend",
+                "value": {"mode": "set", "temp": 18.0},
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_tou_schedule"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_schedule_arrive_record(ws_hass, store, connection):
+    """An arrive record persists; a missing or out-of-range temp is rejected."""
+    await store.async_load()
+
+    msg = {
+        "id": 66,
+        "type": "roommind/settings/save",
         "tou_next_rate_entity": "sensor.hydro_one_next_rate",
-        "tou_coast_rules": [
+        "tou_schedules": [
             {
                 "id": "any",
-                "name": "wait for whatever",
+                "name": "warm by nine",
                 "rooms": ["living_room"],
-                "trigger": {"from_tier": "off", "to_tier": ""},
-                "coast_temp": 18.0,
-                "end": {"mode": "tier_window", "value": ""},
-                "post_hold": "stay",
+                "side": "heat",
+                "tier": "ultra_low",
+                "edge": "end",
+                "until": "clock",
+                "clock": "09:00",
+                "value": {"mode": "arrive", "temp": 20.0},
             }
         ],
     }
@@ -3453,8 +3483,23 @@ async def test_save_settings_tou_any_tier_window(ws_hass, store, connection):
 
     connection.send_result.assert_called_once()
     settings = connection.send_result.call_args[0][1]["settings"]
-    assert settings["tou_next_rate_entity"] == "sensor.hydro_one_next_rate"
-    assert settings["tou_coast_rules"][0]["end"] == {"mode": "tier_window", "value": ""}
+    assert settings["tou_schedules"][0]["value"]["mode"] == "arrive"
+
+    bad = {
+        "id": 67,
+        "type": "roommind/settings/save",
+        "tou_schedules": [
+            {
+                "id": "bad",
+                "name": "x",
+                "rooms": ["living_room"],
+                "side": "heat",
+                "value": {"mode": "arrive"},
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, bad)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_schedule"
 
 
 @pytest.mark.asyncio
@@ -3495,68 +3540,131 @@ async def test_save_settings_tou_rate_windows_invalid(ws_hass, store, connection
 
 
 @pytest.mark.asyncio
-async def test_save_settings_tou_coast_side_temps(ws_hass, store, connection):
-    """Coast rules persist per-side temperatures; a blank side stores as null."""
+async def test_save_room_tou_overrides(ws_hass, store, connection):
+    """Tariff schedule rows persist on the room, including blank sides."""
     await store.async_load()
 
     msg = {
         "id": 68,
-        "type": "roommind/settings/save",
-        "tou_coast_rules": [
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_overrides": [
             {
                 "id": "cool-only",
                 "name": "Relax cooling only",
-                "rooms": ["living_room"],
-                "trigger": {"from_tier": "off", "to_tier": "peak"},
-                "coast_heat_temp": None,
-                "coast_cool_temp": 26.0,
-                "end": {"mode": "duration", "value": 120},
-                "post_hold": "schedule",
-            }
+                "tier": "peak",
+                "edge": "start",
+                "action": "set",
+                "heat": None,
+                "cool": 26.0,
+                "until": "minutes",
+                "minutes": 120,
+            },
+            {
+                "id": "nine",
+                "name": "Warm by nine",
+                "tier": "ultra_low",
+                "edge": "end",
+                "action": "arrive",
+                "heat": 20.0,
+                "cool": None,
+                "clock": "09:00",
+            },
         ],
     }
-    await _save_settings(ws_hass, connection, msg)
-
-    connection.send_result.assert_called_once()
-    rule = connection.send_result.call_args[0][1]["settings"]["tou_coast_rules"][0]
-    assert rule["coast_heat_temp"] is None
-    assert rule["coast_cool_temp"] == 26.0
+    await _save_room(ws_hass, connection, msg)
+    room = connection.send_result.call_args[0][1]["room"]
+    assert room["tou_overrides"][0]["heat"] is None
+    assert room["tou_overrides"][0]["cool"] == 26.0
+    assert room["tou_overrides"][1]["action"] == "arrive"
+    assert room["tou_overrides"][1]["clock"] == "09:00"
 
 
 @pytest.mark.asyncio
-async def test_save_settings_tou_coast_needs_one_side(ws_hass, store, connection):
-    """A rule blank on both sides is rejected — disabling is what the toggle is for."""
+async def test_save_room_tou_override_needs_one_side(ws_hass, store, connection):
+    """A row blank on both sides is rejected — disabling is what the toggle is for."""
     await store.async_load()
 
     msg = {
         "id": 69,
-        "type": "roommind/settings/save",
-        "tou_coast_rules": [
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_overrides": [
             {
                 "id": "empty",
                 "name": "empty",
-                "rooms": ["living_room"],
-                "trigger": {"from_tier": "", "to_tier": "peak"},
-                "coast_heat_temp": None,
-                "coast_cool_temp": None,
-                "end": {"mode": "duration", "value": 120},
-                "post_hold": "schedule",
+                "tier": "peak",
+                "action": "set",
+                "heat": None,
+                "cool": None,
+                "until": "tier_window",
             }
         ],
     }
-    await _save_settings(ws_hass, connection, msg)
+    await _save_room(ws_hass, connection, msg)
 
     assert connection.send_result.call_count == 0
-    assert connection.send_error.call_args[0][1] == "invalid_tou_coast_temp"
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
 
 
 @pytest.mark.asyncio
-async def test_save_settings_tou_schedules_supersede_coast(ws_hass, store, connection):
-    """Schedules persist, strip the legacy editor, and enforce lead ranges."""
+async def test_save_room_tou_override_value_checks(ws_hass, store, connection):
+    """Arrive needs a clock, set needs a sane temperature, raise/lower a delta range."""
+    await store.async_load()
+
+    arrive_no_clock = {
+        "id": 70,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_overrides": [{"id": "a", "name": "x", "tier": "peak", "action": "arrive", "heat": 20.0, "clock": ""}],
+    }
+    await _save_room(ws_hass, connection, arrive_no_clock)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+    hot = {
+        "id": 71,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_overrides": [{"id": "s", "name": "x", "tier": "peak", "action": "set", "heat": 110.0}],
+    }
+    await _save_room(ws_hass, connection, hot)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+    big_delta = {
+        "id": 72,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_overrides": [{"id": "d", "name": "x", "tier": "peak", "action": "raise", "heat": 9.0}],
+    }
+    await _save_room(ws_hass, connection, big_delta)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+    dup = {
+        "id": 73,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_overrides": [
+            {"id": "same", "name": "x", "tier": "peak", "action": "set", "heat": 18.0},
+            {"id": "same", "name": "y", "tier": "off", "action": "set", "heat": 18.0},
+        ],
+    }
+    await _save_room(ws_hass, connection, dup)
+    assert connection.send_error.call_args[0][1] == "duplicate_tou_override_id"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_schedules_enforce_lead_ranges(ws_hass, store, connection):
+    """Schedules persist and enforce lead ranges."""
     await store.async_load()
 
     msg = {
-        "id": 70,
+        "id": 74,
         "type": "roommind/settings/save",
         "tou_schedules": [
             {
@@ -3577,11 +3685,10 @@ async def test_save_settings_tou_schedules_supersede_coast(ws_hass, store, conne
 
     connection.send_result.assert_called_once()
     saved = connection.send_result.call_args[0][1]["settings"]
-    assert saved["tou_coast_rules"] == []
     assert saved["tou_schedules"][0]["minutes"] == 90
 
     bad = {
-        "id": 71,
+        "id": 75,
         "type": "roommind/settings/save",
         "tou_schedules": [
             {
