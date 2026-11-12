@@ -104,6 +104,34 @@ export class RsTouSection extends LitElement {
    * the name that travels with the fields in the same save.
    */
   @state() private _pending: Record<string, TouRuleDef> = {};
+  /**
+   * Brand-new rules live here until they have a name and are saved — an
+   * unnamed rule never reaches the server, and moving away from one asks to
+   * discard it (skipping the question discards, the default).
+   */
+  @state() private _drafts: TouOverrideRow[] = [];
+
+  /** Rows rendered in the editor: saved references first, then local drafts. */
+  private get _rows(): TouOverrideRow[] {
+    return [...this.overrides, ...this._drafts];
+  }
+
+  private _isDraft(rowId: string): boolean {
+    return this._drafts.some((d) => d.id === rowId);
+  }
+
+  /** The definition in flight for a row when it leaves the editor: staged
+   * edits for any row, plus the draft's own definition for new rules.
+   * Saved rows without staged edits return null — nothing to validate. */
+  private _stagedDef(row: TouOverrideRow): TouRuleDef | null {
+    if (this._pending[row.id]) return this._pending[row.id];
+    if (this._isDraft(row.id)) return row.definition ?? null;
+    return null;
+  }
+
+  private static _nameMissing(def: TouRuleDef | null): boolean {
+    return def !== null && !String(def.name ?? "").trim();
+  }
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -368,9 +396,9 @@ export class RsTouSection extends LitElement {
       ${
         this.scheduleEnabled
           ? html`
-              ${this.overrides.map((row, idx) => this._renderRowEditor(row, idx, l))}
+              ${this._rows.map((row) => this._renderRowEditor(row, l))}
               ${
-                this.overrides.length === 0
+                this._rows.length === 0
                   ? html`<div class="hint">${localize("tou.schedule_empty", l)}</div>`
                   : nothing
               }
@@ -385,7 +413,7 @@ export class RsTouSection extends LitElement {
                   @selected=${(e: Event) => {
                     const v = getSelectValue(e);
                     if (!v) return;
-                    if (v === PICKER_NEW) this._addNewRule(l);
+                    if (v === PICKER_NEW) this._addNewRule();
                     else this._addFromRule(v);
                     requestAnimationFrame(() => {
                       (e.target as HTMLElement & { value: string }).value = "";
@@ -436,7 +464,7 @@ export class RsTouSection extends LitElement {
 
   // ---- Row editor (collapsed ↔ expanded) ----
 
-  private _renderRowEditor(row: TouOverrideRow, idx: number, l: string) {
+  private _renderRowEditor(row: TouOverrideRow, l: string) {
     const expanded = !!this._expanded[row.id];
     const rule = this._defOf(row);
     const head = html`
@@ -456,7 +484,7 @@ export class RsTouSection extends LitElement {
         <ha-icon-button
           .path=${CLOSE_ICON}
           .label=${localize("tou.override_delete", l)}
-          @click=${() => this._removeRow(idx)}
+          @click=${() => this._removeRowById(row.id)}
         ></ha-icon-button>
       </div>
     `;
@@ -681,7 +709,7 @@ export class RsTouSection extends LitElement {
             <span>${localize("tou.override_enabled", l)}</span>
           </label>
           ${
-            this._pending[row.id]
+            this._pending[row.id] || this._isDraft(row.id)
               ? html`
                   <div class="foot-actions">
                     <div class="hint save-hint">${localize("tou.save_stage_hint", l)}</div>
@@ -721,48 +749,162 @@ export class RsTouSection extends LitElement {
   }
 
   private _toggleExpanded(rowId: string) {
-    // Collapsing a staged row is the save trigger.
-    if (this._expanded[rowId] && Object.keys(this._pending).length > 0) {
-      this._emitRows(this._flushPending(this.overrides));
+    // Collapsing a row is the save trigger; it may ask to discard instead
+    // (unnamed rule) or refuse to collapse (user chose to keep editing).
+    if (this._expanded[rowId]) {
+      const row = this._rows.find((r) => r.id === rowId);
+      if (row && !this._leaveRow(row)) return;
+      this._expanded = { ...this._expanded, [rowId]: false };
+      return;
     }
-    this._expanded = { ...this._expanded, [rowId]: !this._expanded[rowId] };
+    this._expanded = { ...this._expanded, [rowId]: true };
   }
 
-  /** Bake every staged definition into the rows and clear the staging. */
-  private _flushPending(rows: TouOverrideRow[]): TouOverrideRow[] {
-    if (Object.keys(this._pending).length === 0) return rows;
-    const out = rows.map((r) =>
-      this._pending[r.id] ? { ...r, definition: this._pending[r.id] } : r,
+  /**
+   * Move-away gate for one row (collapse, Save, dialog close): saves the
+   * staged definition, or — when the rule has no name — asks to discard.
+   * Returns false when the user chose to keep editing (the caller must
+   * stay put), true when the row was saved or discarded.
+   */
+  private _leaveRow(row: TouOverrideRow): boolean {
+    if (!RsTouSection._nameMissing(this._stagedDef(row))) {
+      this._saveRow(row);
+      return true;
+    }
+    const msg = localize(
+      this._isDraft(row.id) ? "tou.discard_new_rule" : "tou.discard_unnamed",
+      this.hass.language,
     );
-    this._pending = {};
-    return out;
+    if (confirm(msg)) {
+      this._discardRow(row.id);
+      return true;
+    }
+    return false;
   }
 
-  /** Called by the room detail before the edit dialog closes: staged edits
-   * must reach the parent while this element is still connected (a
-   * disconnected node's events never bubble). */
-  public flushPending(): void {
-    if (Object.keys(this._pending).length > 0) {
-      this._emitRows(this._flushPending(this.overrides));
+  /** Commits one row: promotes a named draft, bakes staged edits. */
+  private _saveRow(row: TouOverrideRow): void {
+    const pending = this._pending[row.id];
+    if (this._isDraft(row.id)) {
+      const draft = this._drafts.find((d) => d.id === row.id);
+      if (!draft) return;
+      this._dropPending(row.id);
+      this._drafts = this._drafts.filter((d) => d.id !== row.id);
+      this._emitRows([...this.overrides, { ...draft, definition: pending ?? draft.definition }]);
+      return;
     }
+    if (!pending) return;
+    this._dropPending(row.id);
+    this._emitRows(
+      this.overrides.map((r) => (r.id === row.id ? { ...r, definition: pending } : r)),
+    );
+  }
+
+  /** Drops everything in flight for a row: staged edits, or the whole draft.
+   * An existing rule reverts to its plain library reference. */
+  private _discardRow(rowId: string): void {
+    this._dropPending(rowId);
+    if (this._isDraft(rowId)) {
+      this._drafts = this._drafts.filter((d) => d.id !== rowId);
+      return;
+    }
+    this._emitRows(
+      this.overrides.map((r) => {
+        if (r.id !== rowId) return r;
+        const ref = { ...r };
+        delete ref.definition;
+        return ref;
+      }),
+    );
+  }
+
+  private _dropPending(rowId: string): void {
+    if (this._pending[rowId]) {
+      const pend = { ...this._pending };
+      delete pend[rowId];
+      this._pending = pend;
+    }
+  }
+
+  /**
+   * Called by the room detail before the edit dialog closes: rows in flight
+   * are saved (or the discard question is asked) while this element is
+   * still connected — a disconnected node's events never bubble. Returns
+   * false when the user chose to keep editing, which blocks the close.
+   * Walking away without this hook (tab switch, reload) discards by
+   * default, because unnamed work never left the card anyway.
+   */
+  public flushPending(): boolean {
+    const l = this.hass.language;
+    for (const row of this._rows) {
+      const inFlight = this._pending[row.id] ?? (this._isDraft(row.id) ? row.definition : null);
+      if (!inFlight) continue;
+      if (RsTouSection._nameMissing(inFlight)) {
+        const msg = localize(
+          this._isDraft(row.id) ? "tou.discard_new_rule" : "tou.discard_unnamed",
+          l,
+        );
+        if (!confirm(msg)) return false; // keep editing: block the dialog close
+      }
+    }
+    // One batched save — sequential per-row emits would each read the stale
+    // overrides prop and clobber each other: promote named drafts, bake
+    // staged definitions, revert saved rows whose staged rename is nameless.
+    if (Object.keys(this._pending).length === 0 && this._drafts.length === 0) return true;
+    const promoted: TouOverrideRow[] = [];
+    for (const d of this._drafts) {
+      const def = this._pending[d.id] ?? d.definition;
+      if (def && String(def.name ?? "").trim()) promoted.push({ ...d, definition: def });
+    }
+    const baked = this.overrides.map((r) => {
+      const pend = this._pending[r.id];
+      if (pend && !String(pend.name ?? "").trim()) {
+        const ref = { ...r };
+        delete ref.definition;
+        return ref;
+      }
+      return pend ? { ...r, definition: pend } : r;
+    });
+    this._drafts = [];
+    this._pending = {};
+    this._emitRows([...baked, ...promoted]);
+    return true;
   }
 
   private _updateRow(rowId: string, patch: Partial<TouOverrideRow>) {
-    // Row-level changes (the enabled toggle) save with any staged definition
-    // included, so a staged edit can never be silently dropped.
-    if (this._pending[rowId]) {
-      this._emitRows(
-        this._flushPending(this.overrides).map((r) => (r.id === rowId ? { ...r, ...patch } : r)),
+    // Row-level changes (the enabled toggle) save together with any staged
+    // definition, so a staged edit can never be silently dropped. An
+    // unnamed in-flight definition goes through the move-away gate first.
+    const row = this._rows.find((r) => r.id === rowId);
+    if (row && RsTouSection._nameMissing(this._stagedDef(row))) {
+      this._leaveRow(row);
+      return;
+    }
+    const pending = this._pending[rowId];
+    if (this._isDraft(rowId)) {
+      if (pending) this._dropPending(rowId);
+      this._drafts = this._drafts.map((d) =>
+        d.id === rowId
+          ? { ...d, ...patch, definition: pending ? { ...d.definition, ...pending } : d.definition }
+          : d,
       );
       return;
     }
-    this._emitRows(this.overrides.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
+    if (pending) this._dropPending(rowId);
+    this._emitRows(
+      this.overrides.map((r) => {
+        if (r.id !== rowId) return r;
+        const merged = { ...r, ...patch };
+        if (pending) merged.definition = pending;
+        return merged;
+      }),
+    );
   }
 
   /** Stages a definition edit locally; nothing reaches the server until the
-   * row is saved (collapsed / Save / dialog close). */
+   * row is saved (collapse / Save / dialog close). */
   private _updateDef(rowId: string, patch: Partial<TouRuleDef>) {
-    const row = this.overrides.find((r) => r.id === rowId);
+    const row = this._rows.find((r) => r.id === rowId);
     if (!row) return;
     const base = this._defOf(row);
     if (!base) return;
@@ -770,13 +912,14 @@ export class RsTouSection extends LitElement {
   }
 
   /**
-   * The name doubles as the rule picker. On a row with no staged edits,
-   * choosing an existing rule's name ADOPTS it: the row switches its
-   * reference and the editor loads that shared config — nothing is written.
-   * With staged edits (or any rename), the name change rides the staged
-   * definition to the save, where the server decides: a fresh name forks a
-   * derivative and the shared rule was never touched; a name another rule
-   * already owns merges.
+   * The name doubles as the rule picker. Choosing an existing rule's name
+   * on a row with nothing in flight ADOPTS it: the row switches its
+   * reference and the editor loads that shared config — nothing is
+   * written. A new draft that picks an existing name becomes a plain
+   * reference to that rule instead of a same-named clone. With staged
+   * edits, the name change rides the staged definition to the save, where
+   * the server decides: a fresh name forks a derivative and the shared
+   * rule was never touched; a name another rule already owns merges.
    */
   private _onNameChosen(row: TouOverrideRow, raw: string) {
     const name = raw.trim();
@@ -786,6 +929,14 @@ export class RsTouSection extends LitElement {
     if (!this._pending[row.id]) {
       const source = this.rules.find((r) => r.name === name);
       if (source && source.id !== row.rule_id) {
+        if (this._isDraft(row.id)) {
+          this._drafts = this._drafts.filter((d) => d.id !== row.id);
+          this._emitRows([
+            ...this.overrides,
+            { id: row.id, rule_id: source.id, enabled: row.enabled },
+          ]);
+          return;
+        }
         this._emitRows(
           this.overrides.map((r) =>
             r.id === row.id ? { id: r.id, rule_id: source.id, enabled: r.enabled } : r,
@@ -820,20 +971,19 @@ export class RsTouSection extends LitElement {
     `;
   }
 
-  private _removeRow(idx: number) {
-    const removed = this.overrides[idx];
-    if (removed) {
-      const expanded = { ...this._expanded };
-      delete expanded[removed.id];
-      this._expanded = expanded;
-      // Deleting the row discards its staged edits — they have no future.
-      if (this._pending[removed.id]) {
-        const pending = { ...this._pending };
-        delete pending[removed.id];
-        this._pending = pending;
-      }
+  private _removeRowById(rowId: string) {
+    const expanded = { ...this._expanded };
+    delete expanded[rowId];
+    this._expanded = expanded;
+    // Deleting a row discards its staged edits and drafts — they have no
+    // future. A saved row's removal also drops its last reference, letting
+    // the server prune the shared rule when nothing else uses it.
+    this._dropPending(rowId);
+    if (this._isDraft(rowId)) {
+      this._drafts = this._drafts.filter((d) => d.id !== rowId);
+      return;
     }
-    this._emitRows(this.overrides.filter((_, i) => i !== idx));
+    this._emitRows(this.overrides.filter((r) => r.id !== rowId));
   }
 
   private _addFromRule(ruleId: string) {
@@ -842,11 +992,14 @@ export class RsTouSection extends LitElement {
     this._emitRows([...this.overrides, { id, rule_id: ruleId, enabled: true }]);
   }
 
-  private _addNewRule(l: string) {
+  /** New rules start as local drafts with a blank name: nothing reaches the
+   * server until the row is saved with a name (mandatory). Leaving the
+   * draft unnamed asks to discard — and skipping the question discards. */
+  private _addNewRule() {
     const ruleId = newId();
     const rowId = newId();
     const definition: TouRuleDef = {
-      name: localize("tou.new_rule", l),
+      name: "",
       tier: "peak",
       edge: "start",
       action: "set",
@@ -859,7 +1012,8 @@ export class RsTouSection extends LitElement {
       between: null,
     };
     this._expanded = { ...this._expanded, [rowId]: true };
-    this._emitRows([...this.overrides, { id: rowId, rule_id: ruleId, enabled: true, definition }]);
+    this._drafts = [...this._drafts, { id: rowId, rule_id: ruleId, enabled: true, definition }];
+    this.requestUpdate();
   }
 
   private _emitRows(rows: TouOverrideRow[]) {

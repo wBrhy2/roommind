@@ -396,10 +396,12 @@ export class RsRoomDetail extends LitElement {
 
   private _closeEdit = () => {
     // Flush staged tariff-rule edits while the section is still connected —
-    // a disconnected element's events never reach this parent.
-    (
-      this.shadowRoot?.querySelector("rs-tou-section") as { flushPending?: () => void } | undefined
-    )?.flushPending?.();
+    // a disconnected element's events never reach this parent. A false
+    // return means the user chose to keep editing (unnamed rule): the
+    // dialog stays open.
+    const el = this.shadowRoot?.querySelector("rs-tou-section") as
+      { flushPending?: () => boolean } | undefined;
+    if (el?.flushPending?.() === false) return;
     this._editing = null;
   };
 

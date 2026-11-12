@@ -125,21 +125,23 @@ want to sit at 17:00.
 Each room (except outdoor rooms) has a **Time-of-Use mode**:
 
 - `Off` — ignore tariffs (default; upgrades are unaffected).
-- `Setback only` — the target eases during mid-peak and peak tiers, never
-  above the schedule.
-- `Setback + boost` — additionally pre-charges during ultra-low tiers: heat
-  rises up to **Highest pre-charge target**, cooling dips, so the following
-  peak runs on stored comfort.
-- `Boost only` — the reverse posture: ultra-low tiers pre-charge exactly as
-  `Setback + boost` does, but mid/peak tiers leave the schedule untouched —
-  the room charges cheap and never relaxes on its own.
+- `Pre-cool` (`setback`) — the target eases during mid-peak and peak tiers,
+  never above the schedule.
+- `Pre-cool + pre-heat` (`setback_boost`) — additionally pre-charges during
+  ultra-low tiers: heat rises up to **Highest pre-heat target**, cooling
+  dips, so the following peak runs on stored comfort.
+- `Pre-heat only` (`boost_only`) — the reverse posture: ultra-low tiers
+  pre-heat exactly as `Pre-cool + pre-heat` does, but mid/peak tiers leave
+  the schedule untouched — the room charges cheap and never relaxes on its
+  own.
 
-How far a participating room actually shifts is not per-room: the setback
-depths and peak limits come from the shaping defaults in
-`Settings -> Time-of-Use` (fine-tune), and the card shows the current values
-under the mode selector so you can see what the posture will do. The only
-per-room shaping number is the boost ceiling (**Highest pre-charge
-target**).
+The names in brackets are the stored mode ids; only the labels were renamed.
+
+How far a participating room actually shifts is not per-room: the shaping
+defaults come from `Settings -> Time-of-Use` (fine-tune), and the card shows
+the current numbers under the mode selector so you can see what the posture
+will do. The only per-room shaping number is the pre-heat ceiling
+(**Highest pre-heat target**).
 
 `Eco when the room is empty` and away-presence eco still cap the result —
 unless you tick **Boost even when nobody is here**, which lets an ultra-low
@@ -211,6 +213,10 @@ A rule is authored once and referenced by every room's row: definitions live
 in the integration's store (the shared rule library, `settings.tou_rules`),
 rooms keep thin references `{row, rule_id, enabled}`. Same name always means
 the same rule:
+
+A new rule starts as a **draft on the card** — blank name, nothing sent.
+A name is mandatory: saving an unnamed rule asks whether to discard it, and
+moving away without answering (tab switch, reload) discards it by default.
 
 - **Editing a rule** from any card updates the single shared definition — the
   card shows "used in N rooms" so the blast radius is visible before you
