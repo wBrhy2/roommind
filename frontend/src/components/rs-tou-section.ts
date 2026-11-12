@@ -62,6 +62,7 @@ const WEEKDAYS = [
 ] as const;
 const CHEVRON_RIGHT = "M10,6L8.59,7.41L13.17,12L8.59,16.59L10,18L16,12L10,6Z";
 const CHEVRON_DOWN = "M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z";
+const CHEVRON_UP = "M7.41,15.41L12,10.83L16.59,15.41L18,14L12,8L6,14L7.41,15.41Z";
 
 /** Local HH:MM → minutes, or null when unparseable (mirrors the engine's lenient read). */
 function hhmmToMinutes(text: string): number | null {
@@ -118,6 +119,11 @@ export class RsTouSection extends LitElement {
   @property({ type: Boolean }) public editing = false;
 
   @state() private _expanded: Record<string, boolean> = {};
+  /** Reordering: the row being dragged and the card currently marked as a
+   * drop target. Only saved rows (references) reorder — a draft lives at the
+   * end of the list until its name takes it into the library. */
+  @state() private _dragRow: string | null = null;
+  @state() private _dropTarget: string | null = null;
   /** Tariff timeline segments from `roommind/tou/preview`, feeding the
    * computed-window line while authoring. Empty until loaded (or when the
    * tariff has no future view — then the line stays hidden). */
@@ -286,6 +292,18 @@ export class RsTouSection extends LitElement {
       .row-head .row-summary {
         cursor: pointer;
       }
+      .drag-handle {
+        display: inline-flex;
+        align-items: center;
+        color: var(--secondary-text-color);
+        opacity: 0.7;
+        cursor: grab;
+        padding: 0 2px;
+      }
+      .row-head.drag-over {
+        background: rgba(3, 137, 255, 0.1);
+        border-radius: 8px;
+      }
       .anchor-grid,
       .temp-grid,
       .end-grid {
@@ -382,6 +400,11 @@ export class RsTouSection extends LitElement {
           this.scheduleEnabled
             ? html`<div class="row-list">
                 ${this.overrides.map((row) => this._renderViewRow(row, l))}
+                ${
+                  this.overrides.length > 1
+                    ? html`<div class="hint">${localize("tou.row_priority_note", l)}</div>`
+                    : nothing
+                }
               </div>`
             : this.overrides.length > 0
               ? html`<div class="hint">${localize("tou.schedule_off_hint", l)}</div>`
@@ -446,6 +469,11 @@ export class RsTouSection extends LitElement {
         this.scheduleEnabled
           ? html`
               ${this._rows.map((row) => this._renderRowEditor(row, l))}
+              ${
+                this._rows.length > 1
+                  ? html`<div class="hint">${localize("tou.row_priority_note", l)}</div>`
+                  : nothing
+              }
               ${
                 this._rows.length === 0
                   ? html`<div class="hint">${localize("tou.schedule_empty", l)}</div>`
@@ -516,8 +544,47 @@ export class RsTouSection extends LitElement {
   private _renderRowEditor(row: TouOverrideRow, l: string) {
     const expanded = !!this._expanded[row.id];
     const rule = this._defOf(row);
+    const saved = this._isSavedRow(row.id);
+    const idx = this.overrides.findIndex((r) => r.id === row.id);
+    const dropActive = this._dropTarget === row.id && saved;
     const head = html`
-      <div class="row-head">
+      <div
+        class="row-head ${dropActive ? "drag-over" : ""}"
+        @dragover=${(e: DragEvent) => {
+          if (saved && this._dragRow && this._dragRow !== row.id) {
+            e.preventDefault();
+            this._dropTarget = row.id;
+          }
+        }}
+        @dragleave=${() => {
+          if (this._dropTarget === row.id) this._dropTarget = null;
+        }}
+        @drop=${(e: DragEvent) => {
+          e.preventDefault();
+          this._dropOnRow(row.id);
+        }}
+      >
+        ${
+          saved
+            ? html`<span
+                class="drag-handle"
+                draggable="true"
+                title=${localize("tou.row_drag", l)}
+                @dragstart=${(e: DragEvent) => {
+                  this._dragRow = row.id;
+                  if (e.dataTransfer) {
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", row.id);
+                  }
+                }}
+                @dragend=${() => {
+                  this._dragRow = null;
+                  this._dropTarget = null;
+                }}
+                ><ha-icon icon="mdi:drag-vertical"></ha-icon
+              ></span>`
+            : nothing
+        }
         <ha-icon-button
           .path=${expanded ? CHEVRON_DOWN : CHEVRON_RIGHT}
           .label=${localize("tou.schedule_title", l)}
@@ -530,6 +597,24 @@ export class RsTouSection extends LitElement {
               : html`<span class="missing">${localize("tou.rule_missing", l)}</span>`
           }
         </div>
+        ${
+          saved
+            ? html`
+                <ha-icon-button
+                  .path=${CHEVRON_UP}
+                  .label=${localize("tou.row_up", l)}
+                  .disabled=${idx <= 0}
+                  @click=${() => this._moveRow(row.id, -1)}
+                ></ha-icon-button>
+                <ha-icon-button
+                  .path=${CHEVRON_DOWN}
+                  .label=${localize("tou.row_down", l)}
+                  .disabled=${idx < 0 || idx >= this.overrides.length - 1}
+                  @click=${() => this._moveRow(row.id, 1)}
+                ></ha-icon-button>
+              `
+            : nothing
+        }
         <ha-icon-button
           .path=${CLOSE_ICON}
           .label=${localize("tou.override_delete", l)}
@@ -866,6 +951,40 @@ export class RsTouSection extends LitElement {
     return Object.values(this.allRooms).filter((room) =>
       (room.tou_overrides ?? []).some((o) => o.rule_id === ruleId),
     ).length;
+  }
+
+  // ---- Reordering ----
+
+  private _isSavedRow(rowId: string): boolean {
+    return this.overrides.some((r) => r.id === rowId);
+  }
+
+  /** Arrow reorder: swap with the neighbouring saved row. Row order is the
+   * engine's priority (the lowest overlapping row wins), so this is a
+   * behaviour change — per room, like every other row knob. */
+  private _moveRow(rowId: string, delta: number) {
+    const rows = [...this.overrides];
+    const from = rows.findIndex((r) => r.id === rowId);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= rows.length) return;
+    const [moved] = rows.splice(from, 1);
+    rows.splice(to, 0, moved);
+    this._emitRows(rows);
+  }
+
+  /** Drop reorder: the dragged row takes the target's position. */
+  private _dropOnRow(targetId: string) {
+    const srcId = this._dragRow;
+    this._dragRow = null;
+    this._dropTarget = null;
+    if (!srcId || srcId === targetId || !this._isSavedRow(srcId) || !this._isSavedRow(targetId))
+      return;
+    const rows = [...this.overrides];
+    const from = rows.findIndex((r) => r.id === srcId);
+    const [moved] = rows.splice(from, 1);
+    const to = rows.findIndex((r) => r.id === targetId);
+    rows.splice(to < 0 ? rows.length : to, 0, moved);
+    this._emitRows(rows);
   }
 
   private _toggleExpanded(rowId: string) {

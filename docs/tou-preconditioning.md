@@ -199,6 +199,14 @@ For every matching change in the timeline the row computes a window:
 - **Holds**: until the next period change, for a fixed number of minutes, or
   until a wall-clock time.
 
+Rows also carry **priority**: when two rows steer the same side and their
+windows overlap, the row listed **lower** on the card wins for the overlap —
+the other resumes where the overlap ends. Drag a row's handle (or use its
+arrows) to reorder; the order lives per room, so reordering here never touches
+the shared rule or any other room. Rows whose windows never meet are
+order-independent — but the preview line each row shows ("next 07:00 → 09:00")
+is where you verify that they never meet.
+
 Because the window is part of the MPC horizon, the optimizer decides *when* to
 start charging so the room arrives at the hold target by the boundary and how
 much of the expensive window it can coast through — the boost hours you once

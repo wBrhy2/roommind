@@ -3699,6 +3699,48 @@ async def test_save_room_tou_override_validation(ws_hass, store, connection):
     assert connection.send_error.call_args[0][1] == "duplicate_tou_override_id"
 
 
+@pytest.mark.asyncio
+async def test_save_room_tou_row_order_persisted(ws_hass, store, connection):
+    """Row order is the engine's priority (lowest overlapping row wins), so a
+    save must keep the card's list order exactly — reorder-on-card works."""
+    await store.async_load()
+    await _save_room(
+        ws_hass,
+        connection,
+        {
+            "id": 91,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room_abc12345",
+            "thermostats": ["climate.living_room"],
+            "tou_overrides": [
+                {"id": "rowA", "rule_id": "rl1", "enabled": True},
+                {"id": "rowB", "rule_id": "rl2", "enabled": True},
+            ],
+        },
+    )
+    assert connection.send_result.call_args[0][0] == 91
+    saved = store.get_room("living_room_abc12345")["tou_overrides"]
+    assert [r["id"] for r in saved] == ["rowA", "rowB"]
+
+    # The card's arrows just re-emit the list in the new order.
+    await _save_room(
+        ws_hass,
+        connection,
+        {
+            "id": 92,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room_abc12345",
+            "thermostats": ["climate.living_room"],
+            "tou_overrides": [
+                {"id": "rowB", "rule_id": "rl2", "enabled": True},
+                {"id": "rowA", "rule_id": "rl1", "enabled": True},
+            ],
+        },
+    )
+    saved = store.get_room("living_room_abc12345")["tou_overrides"]
+    assert [r["id"] for r in saved] == ["rowB", "rowA"]
+
+
 def test_room_save_schema_accepts_panel_shaped_rows():
     """The *production* schema (not the wrapped handler) must accept what the panel sends.
 
