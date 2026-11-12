@@ -182,9 +182,23 @@ def _tou_rule_def_error(defn: dict) -> str | None:
     until = str(defn.get("until") or "tier_window")
     if until not in TOU_ROW_UNTILS:
         return f"Unknown end '{until}'"
-    if action == "arrive" or until == "clock":
-        if not _hhmm_ok(str(defn.get("clock") or "")):
+    if action == "arrive":
+        # Arrival modes (see TouManager._rule_records): an arrival clock means
+        # "reach by HH:MM" (the edge must be parseable); no clock means the
+        # room coasts through the anchored period to its end. Any-tier arrivals
+        # would fire on every boundary, and fixed minutes end nothing.
+        if str(defn.get("tier") or "any") == "any":
+            return "'arrive' needs a tariff period to anchor on"
+        if until == "minutes":
+            return "'arrive' cannot end after a fixed duration"
+        clock = str(defn.get("clock") or "")
+        if clock:
+            if not _hhmm_ok(clock):
+                return "'arrive' needs 'HH:MM' or no clock to coast through the period"
+        elif until == "clock":
             return "'clock' end needs 'HH:MM'"
+    elif until == "clock" and not _hhmm_ok(str(defn.get("clock") or "")):
+        return "'clock' end needs 'HH:MM'"
     if until == "minutes" and not (
         TOU_SCHEDULE_MINUTES_MIN <= int(defn.get("minutes") or 0) <= TOU_SCHEDULE_MINUTES_MAX
     ):
@@ -287,7 +301,6 @@ async def _async_prune_tou_rules(hass: HomeAssistant) -> None:
     kept = [e for e in library if isinstance(e, dict) and str(e.get("id")) in referenced]
     if len(kept) != len(library):
         await store.async_save_settings({"tou_rules": kept})
-
 
 
 def _get_coordinator(hass: HomeAssistant) -> RoomMindCoordinator | None:

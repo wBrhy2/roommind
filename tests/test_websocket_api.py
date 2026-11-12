@@ -3627,10 +3627,49 @@ async def test_save_room_tou_override_validation(ws_hass, store, connection):
     arrive_no_clock = {
         "id": "a",
         "rule_id": "x",
-        "definition": {"name": "n", "tier": "peak", "action": "arrive", "heat": 20.0, "clock": ""},
+        "definition": {
+            "name": "n",
+            "tier": "peak",
+            "action": "arrive",
+            "heat": 20.0,
+            "clock": "",
+            "until": "clock",
+        },
     }
     await _save_room(ws_hass, connection, msg(70, [arrive_no_clock]))
     assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+    arrive_any_tier = {
+        "id": "b",
+        "rule_id": "x",
+        "definition": {"name": "n", "tier": "any", "action": "arrive", "heat": 20.0, "until": "tier_window"},
+    }
+    await _save_room(ws_hass, connection, msg(75, [arrive_any_tier]))
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+    arrive_minutes = {
+        "id": "c",
+        "rule_id": "x",
+        "definition": {
+            "name": "n",
+            "tier": "peak",
+            "action": "arrive",
+            "heat": 20.0,
+            "until": "minutes",
+            "minutes": 60,
+        },
+    }
+    await _save_room(ws_hass, connection, msg(76, [arrive_minutes]))
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+    # A clock-less coast-through arrival is valid: anchored period, lands at end.
+    coast = {
+        "id": "k",
+        "rule_id": "x",
+        "definition": {"name": "n", "tier": "peak", "action": "arrive", "heat": 19.0, "until": "tier_window"},
+    }
+    await _save_room(ws_hass, connection, msg(77, [coast]))
+    assert connection.send_result.call_args[0][0] == 77
 
     hot = {
         "id": "s",
@@ -3709,8 +3748,12 @@ def test_room_save_schema_accepts_panel_shaped_rows():
     assert validated["tou_overrides"][0]["definition"]["id"] == "rl1"
 
     # Truly unknown keys inside a definition must still be rejected.
-    bad = {**msg, "tou_overrides": [{**msg["tou_overrides"][0], "definition": {
-        **msg["tou_overrides"][0]["definition"], "nonsense": 1}}]}
+    bad = {
+        **msg,
+        "tou_overrides": [
+            {**msg["tou_overrides"][0], "definition": {**msg["tou_overrides"][0]["definition"], "nonsense": 1}}
+        ],
+    }
     with pytest.raises(vol.Invalid):
         schema(bad)
 
@@ -3730,30 +3773,57 @@ async def test_save_room_tou_rule_propagate_fork_merge(ws_hass, store, connectio
             "tou_overrides": overrides,
         }
 
-    relax = {"name": "peak relax", "tier": "peak", "edge": "start", "action": "set", "heat": 18.0, "until": "tier_window"}
+    relax = {
+        "name": "peak relax",
+        "tier": "peak",
+        "edge": "start",
+        "action": "set",
+        "heat": 18.0,
+        "until": "tier_window",
+    }
     # Room A creates the shared rule.
-    await _save_room(ws_hass, connection, save(80, "living_room_abc12345", [
-        {"id": "rowA", "rule_id": "rule-relax", "enabled": True, "definition": relax}
-    ]))
+    await _save_room(
+        ws_hass,
+        connection,
+        save(
+            80, "living_room_abc12345", [{"id": "rowA", "rule_id": "rule-relax", "enabled": True, "definition": relax}]
+        ),
+    )
     assert {r["id"] for r in store.get_settings()["tou_rules"]} == {"rule-relax"}
 
     # Editing keeps the name: the library entry updates (propagates).
     edited = {**relax, "heat": 17.5}
-    await _save_room(ws_hass, connection, save(81, "living_room_abc12345", [
-        {"id": "rowA", "rule_id": "rule-relax", "enabled": True, "definition": edited}
-    ]))
+    await _save_room(
+        ws_hass,
+        connection,
+        save(
+            81, "living_room_abc12345", [{"id": "rowA", "rule_id": "rule-relax", "enabled": True, "definition": edited}]
+        ),
+    )
     assert store.get_settings()["tou_rules"][0]["heat"] == 17.5
 
     # Room B references the same rule without a definition.
-    await _save_room(ws_hass, connection, save(82, "living_room", [
-        {"id": "rowB", "rule_id": "rule-relax", "enabled": True}
-    ]))
+    await _save_room(
+        ws_hass, connection, save(82, "living_room", [{"id": "rowB", "rule_id": "rule-relax", "enabled": True}])
+    )
 
     # Room A renames the rule: forks a derivative; room B keeps the original.
-    await _save_room(ws_hass, connection, save(83, "living_room_abc12345", [
-        {"id": "rowA", "rule_id": "rule-relax", "enabled": True,
-         "definition": {**edited, "name": "evening relax"}}
-    ]))
+    await _save_room(
+        ws_hass,
+        connection,
+        save(
+            83,
+            "living_room_abc12345",
+            [
+                {
+                    "id": "rowA",
+                    "rule_id": "rule-relax",
+                    "enabled": True,
+                    "definition": {**edited, "name": "evening relax"},
+                }
+            ],
+        ),
+    )
     library = store.get_settings()["tou_rules"]
     assert {r["name"] for r in library} == {"peak relax", "evening relax"}
     forked = next(r for r in library if r["name"] == "evening relax")
@@ -3763,10 +3833,22 @@ async def test_save_room_tou_rule_propagate_fork_merge(ws_hass, store, connectio
 
     # Renaming the fork back onto the taken name merges: incoming definition wins,
     # every reference repoints to the canonical id ("applies to both rooms").
-    await _save_room(ws_hass, connection, save(84, "living_room_abc12345", [
-        {"id": "rowA", "rule_id": forked["id"], "enabled": True,
-         "definition": {**edited, "name": "peak relax", "heat": 19.0}}
-    ]))
+    await _save_room(
+        ws_hass,
+        connection,
+        save(
+            84,
+            "living_room_abc12345",
+            [
+                {
+                    "id": "rowA",
+                    "rule_id": forked["id"],
+                    "enabled": True,
+                    "definition": {**edited, "name": "peak relax", "heat": 19.0},
+                }
+            ],
+        ),
+    )
     library = store.get_settings()["tou_rules"]
     assert len(library) == 1
     assert library[0]["id"] == "rule-relax"
@@ -3777,10 +3859,22 @@ async def test_save_room_tou_rule_propagate_fork_merge(ws_hass, store, connectio
     # The staged-save guarantee: field edits AND a rename in one save fork a
     # derivative — the shared rule keeps its current definition. (This is
     # the edit-then-rename order that used to clobber the original.)
-    await _save_room(ws_hass, connection, save(85, "living_room_abc12345", [
-        {"id": "rowA", "rule_id": "rule-relax", "enabled": True,
-         "definition": {**edited, "name": "solo fork", "heat": 16.0}}
-    ]))
+    await _save_room(
+        ws_hass,
+        connection,
+        save(
+            85,
+            "living_room_abc12345",
+            [
+                {
+                    "id": "rowA",
+                    "rule_id": "rule-relax",
+                    "enabled": True,
+                    "definition": {**edited, "name": "solo fork", "heat": 16.0},
+                }
+            ],
+        ),
+    )
     library = store.get_settings()["tou_rules"]
     assert len(library) == 2
     relax = next(r for r in library if r["id"] == "rule-relax")
@@ -3829,28 +3923,36 @@ async def test_delete_room_prunes_tou_rules(ws_hass, store, connection):
     """Deleting the room that alone references a rule prunes the library."""
     await store.async_load()
 
-    await _save_room(ws_hass, connection, {
-        "id": 88,
-        "type": "roommind/rooms/save",
-        "area_id": "living_room_abc12345",
-        "thermostats": ["climate.living_room"],
-        "tou_schedule_enabled": True,
-        "tou_overrides": [
-            {
-                "id": "row1",
-                "rule_id": "only-here",
-                "enabled": True,
-                "definition": {"name": "x", "tier": "peak", "edge": "start", "action": "set", "heat": 18.0},
-            }
-        ],
-    })
+    await _save_room(
+        ws_hass,
+        connection,
+        {
+            "id": 88,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room_abc12345",
+            "thermostats": ["climate.living_room"],
+            "tou_schedule_enabled": True,
+            "tou_overrides": [
+                {
+                    "id": "row1",
+                    "rule_id": "only-here",
+                    "enabled": True,
+                    "definition": {"name": "x", "tier": "peak", "edge": "start", "action": "set", "heat": 18.0},
+                }
+            ],
+        },
+    )
     assert store.get_settings()["tou_rules"]
 
-    await _delete_room(ws_hass, connection, {
-        "id": 89,
-        "type": "roommind/rooms/delete",
-        "area_id": "living_room_abc12345",
-    })
+    await _delete_room(
+        ws_hass,
+        connection,
+        {
+            "id": 89,
+            "type": "roommind/rooms/delete",
+            "area_id": "living_room_abc12345",
+        },
+    )
     assert store.get_settings()["tou_rules"] == []
 
 

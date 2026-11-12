@@ -904,6 +904,65 @@ def test_row_arrive_curve_derives_boundary_temperature() -> None:
     assert adjust(b + 121 * 60.0, TargetTemps(heat=21.0, cool=None)).heat == 21.0
 
 
+def test_row_arrive_clock_infers_time_mode() -> None:
+    """An arrive rule carrying a clock is time-mode regardless of ``edge``/
+    ``until`` echo (the card hides those fields): the window runs from the
+    period's end to the clock."""
+    room, settings = _room_schedule(
+        {"tier": "ultra_low", "edge": "start", "action": "arrive", "heat": 20.0, "clock": "09:00"}
+    )
+    (rec,) = TouManager.row_records(room, TouManager.rule_library(settings))
+    assert rec["until"] == "clock" and rec["clock"] == "09:00"
+    assert rec["edge"] == "end" and rec["tier"] == "ultra_low"
+    assert rec["value"] == {"mode": "arrive", "temp": 20.0}
+
+
+def test_row_arrive_coast_through_lands_at_period_end() -> None:
+    """A clock-less arrive rule coasts through the anchored period: the window
+    is the period itself and the decay curve lands the target at its end."""
+    mgr = TouManager(_make_hass({}))
+    now = time.time()
+    b = now + 3600.0  # peak starts in one hour, runs four
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=now, end=b, tier=TOU_TIER_MID),
+            TouSegment(start=b, end=b + 4 * 3600.0, tier=TOU_TIER_PEAK),
+            TouSegment(start=b + 4 * 3600.0, end=now + 16 * 3600, tier=TOU_TIER_OFF),
+        ],
+        current_tier=TOU_TIER_MID,
+        current_rate=None,
+    )
+    room, settings = _room_schedule(
+        {"tier": "peak", "edge": "end", "action": "arrive", "heat": 19.0, "until": "tier_window", "clock": ""}
+    )
+    (rec,) = TouManager.row_records(room, TouManager.rule_library(settings))
+    assert rec["until"] == "window"
+    assert rec["edge"] == "start"  # forced: the coast begins when the period starts
+    assert rec["value"] == {"mode": "arrive", "temp": 19.0}
+
+    adjust = mgr.make_adjuster({**room, "tou_mode": "off"}, settings)
+    assert adjust is None  # rows need a participating room: mode off keeps them inert
+    adjust = mgr.make_adjuster({**room, "tou_schedule_enabled": True}, settings, decay=(0.1, 10.0))
+    assert adjust is not None
+
+    def expected(ts: float) -> float:
+        dt_hours = (b + 4 * 3600.0 - ts) / 3600.0
+        return 10.0 + (19.0 - 10.0) * math.exp(0.1 * dt_hours)
+
+    # Inside the coast: the derived floor slides down the decay curve...
+    at_start = adjust(b, TargetTemps(heat=21.0, cool=None)).heat
+    assert at_start == pytest.approx(expected(b))
+    assert at_start > 19.0
+    mid = adjust(b + 2 * 3600.0, TargetTemps(heat=21.0, cool=None)).heat
+    assert mid == pytest.approx(expected(b + 2 * 3600.0)) and mid < at_start
+    # ...landing exactly on the arrival temperature as the period ends.
+    assert adjust(b + 4 * 3600.0 - 1.0, TargetTemps(heat=21.0, cool=None)).heat == pytest.approx(19.0, abs=0.02)
+    # Before and after the period the row keeps its hands off: the mid-peak
+    # setback still shapes pre-window blocks (21 − 2), the off tier leaves 21.
+    assert adjust(b - 60.0, TargetTemps(heat=21.0, cool=None)).heat == 19.0
+    assert adjust(b + 4 * 3600.0 + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 21.0
+
+
 def test_row_arrive_fallbacks_flat() -> None:
     """Immature model or wrong drift direction: hold the flat target (coast)."""
     mgr = TouManager(_make_hass({}))
@@ -1583,7 +1642,7 @@ def test_rules_ignore_malformed_entries() -> None:
     base = {"id": "ok", "name": "x", "tier": "peak", "edge": "start"}
     room, settings = _room_schedule(
         {"action": "sundial", "heat": 19.0},  # unknown action
-        {"action": "arrive", "heat": 20.0, "clock": ""},  # arrive needs a clock
+        {"action": "arrive", "heat": 20.0, "clock": "", "until": "clock"},  # by-time without a time
         {"action": "set", "heat": None, "cool": None},  # no side to apply
     )
     settings["tou_rules"].append({**base, "action": "set", "heat": 19.0, "until": "tier_window"})

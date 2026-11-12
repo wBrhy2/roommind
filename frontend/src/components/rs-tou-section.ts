@@ -62,6 +62,29 @@ const WEEKDAYS = [
 ] as const;
 const CHEVRON_RIGHT = "M10,6L8.59,7.41L13.17,12L8.59,16.59L10,18L16,12L10,6Z";
 const CHEVRON_DOWN = "M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z";
+
+/** Local HH:MM → minutes, or null when unparseable (mirrors the engine's lenient read). */
+function hhmmToMinutes(text: string): number | null {
+  const parts = String(text || "").split(":");
+  if (parts.length < 2 || parts.some((p) => p === "" || isNaN(Number(p)))) return null;
+  const [h, m] = parts.map(Number);
+  if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+  return h * 60 + m;
+}
+
+/** The engine's _between_ok: the boundary's local time must fall in [from, to), wrapping midnight. */
+function boundaryBetweenOk(
+  ts: number,
+  between: { from: string; to: string } | null | undefined,
+): boolean {
+  if (!between) return true;
+  const f = hhmmToMinutes(between.from);
+  const t = hhmmToMinutes(between.to);
+  if (f === null || t === null || f === t) return true;
+  const d = new Date(ts * 1000);
+  const at = d.getHours() * 60 + d.getMinutes();
+  return f < t ? at >= f && at < t : at >= f || at < t;
+}
 const CLOSE_ICON =
   "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z";
 
@@ -95,6 +118,10 @@ export class RsTouSection extends LitElement {
   @property({ type: Boolean }) public editing = false;
 
   @state() private _expanded: Record<string, boolean> = {};
+  /** Tariff timeline segments from `roommind/tou/preview`, feeding the
+   * computed-window line while authoring. Empty until loaded (or when the
+   * tariff has no future view — then the line stays hidden). */
+  @state() private _previewSegments: [number, number, string][] = [];
   /**
    * Staged definition edits per row, local until saved. Field edits do NOT
    * hit the server live — saving would otherwise propagate a shared rule's
@@ -140,6 +167,28 @@ export class RsTouSection extends LitElement {
     // and the text-field fallback keeps working meanwhile).
     if (!customElements.get("ha-combo-box")) {
       customElements.whenDefined("ha-combo-box").then(() => this.requestUpdate());
+    }
+  }
+
+  private _previewRequested = false;
+
+  protected updated(): void {
+    // Load the tariff timeline once per editing session: the window line
+    // mirrors the engine's compile from segment boundaries, and the timeline
+    // does not change while the dialog is open.
+    if (this.editing && !this._previewRequested) {
+      this._previewRequested = true;
+      this.hass
+        .callWS<{ preview?: { segments?: [number, number, string][] } }>({
+          type: "roommind/tou/preview",
+          area_id: this.areaId,
+        })
+        .then((res) => {
+          this._previewSegments = res?.preview?.segments ?? [];
+        })
+        .catch(() => {
+          /* no future view or offline: the window line simply stays hidden */
+        });
     }
   }
 
@@ -516,49 +565,60 @@ export class RsTouSection extends LitElement {
           ${usage > 1 ? html`<div class="usage-hint">${localize("tou.rule_used_in", l, { count: usage })}</div>` : nothing}
         </div>
 
-        <div class="anchor-grid">
-          <ha-select
-            .label=${localize("tou.override_tier", l)}
-            .value=${rule.tier}
-            .options=${[
-              { value: TIER_ANY, label: localize("tou.tier_any", l) },
-              ...TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) })),
-            ]}
-            @selected=${(e: Event) => {
-              const v = getSelectValue(e);
-              if (v !== null) update({ tier: v as TouTier | typeof TIER_ANY });
-            }}
-            @closed=${(e: Event) => e.stopPropagation()}
-            fixedMenuPosition
-          ></ha-select>
-          <ha-select
-            .label=${localize("tou.override_edge_label", l)}
-            .value=${rule.edge}
-            .options=${(["start", "end"] as const).map((edge) => ({
-              value: edge,
-              label: localize(`tou.override_edge.${edge}`, l),
-            }))}
-            @selected=${(e: Event) => {
-              const v = getSelectValue(e);
-              if (v !== null) update({ edge: v as "start" | "end" });
-            }}
-            @closed=${(e: Event) => e.stopPropagation()}
-            fixedMenuPosition
-          ></ha-select>
-        </div>
-
         <ha-select
           .label=${localize("tou.override_action_label", l)}
           .value=${rule.action}
           .options=${ACTIONS.map((a) => ({ value: a, label: localize(`tou.override_action.${a}`, l) }))}
           @selected=${(e: Event) => {
             const v = getSelectValue(e);
-            if (v !== null) update({ action: v as TouOverrideAction });
+            if (v === null) return;
+            // Entering "arrive" normalizes the hidden anchor fields to a valid
+            // coast-through rule; the arrival submode then owns edge/until/clock.
+            if (v === "arrive")
+              update({ action: v as TouOverrideAction, until: "tier_window", clock: "" });
+            else update({ action: v as TouOverrideAction });
           }}
           @closed=${(e: Event) => e.stopPropagation()}
           fixedMenuPosition
           style="width:100%"
         ></ha-select>
+
+        ${
+          rule.action === "arrive"
+            ? this._renderArriveAnchors(row, rule, l)
+            : html`
+                <div class="anchor-grid">
+                  <ha-select
+                    .label=${localize("tou.override_tier", l)}
+                    .value=${rule.tier}
+                    .options=${[
+                      { value: TIER_ANY, label: localize("tou.tier_any", l) },
+                      ...TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) })),
+                    ]}
+                    @selected=${(e: Event) => {
+                      const v = getSelectValue(e);
+                      if (v !== null) update({ tier: v as TouTier | typeof TIER_ANY });
+                    }}
+                    @closed=${(e: Event) => e.stopPropagation()}
+                    fixedMenuPosition
+                  ></ha-select>
+                  <ha-select
+                    .label=${localize("tou.override_edge_label", l)}
+                    .value=${rule.edge}
+                    .options=${(["start", "end"] as const).map((edge) => ({
+                      value: edge,
+                      label: localize(`tou.override_edge.${edge}`, l),
+                    }))}
+                    @selected=${(e: Event) => {
+                      const v = getSelectValue(e);
+                      if (v !== null) update({ edge: v as "start" | "end" });
+                    }}
+                    @closed=${(e: Event) => e.stopPropagation()}
+                    fixedMenuPosition
+                  ></ha-select>
+                </div>
+              `
+        }
 
         <div class="temp-grid">
           <ha-textfield
@@ -605,12 +665,16 @@ export class RsTouSection extends LitElement {
         ${
           rule.action === "arrive"
             ? html`
-                <ha-textfield
-                  .value=${rule.clock ?? ""}
-                  .label=${localize("tou.override_arrive_at", l)}
-                  pattern="[0-9]{1,2}:[0-9]{2}"
-                  @change=${(e: Event) => update({ clock: (e.target as HTMLInputElement).value })}
-                ></ha-textfield>
+                ${
+                  this._isTimeArrive(rule)
+                    ? html`<ha-textfield
+                        .value=${rule.clock ?? ""}
+                        .label=${localize("tou.override_arrive_at", l)}
+                        pattern="[0-9]{1,2}:[0-9]{2}"
+                        @change=${(e: Event) => update({ clock: (e.target as HTMLInputElement).value })}
+                      ></ha-textfield>`
+                    : nothing
+                }
                 <div class="hint">${localize("tou.arrive_model_note", l)}</div>
               `
             : html`
@@ -699,6 +763,8 @@ export class RsTouSection extends LitElement {
           <div class="hint">${localize("tou.override_between_hint", l)}</div>
         </div>
 
+        ${this._renderWindowBadge(rule, l)}
+
         <div class="row-foot">
           <label class="row-enabled">
             <input
@@ -722,6 +788,60 @@ export class RsTouSection extends LitElement {
               : nothing
           }
         </div>
+      </div>
+    `;
+  }
+
+  // ---- Arrive anchors ----
+
+  /** Arrive mode selector: a clock means "reach by that time" (the charge
+   * period's end opens the coast); no clock means the room coasts through the
+   * anchored period and arrives at its end. Mirrors the backend inference in
+   * TouManager._rule_records, which keys the mode on the clock's presence. */
+  private _isTimeArrive(rule: TouRuleDef): boolean {
+    return String(rule.clock ?? "").trim() !== "";
+  }
+
+  private _renderArriveAnchors(row: TouOverrideRow, rule: TouRuleDef, l: string) {
+    const update = (patch: Partial<TouRuleDef>) => this._updateDef(row.id, patch);
+    const time = this._isTimeArrive(rule);
+    // The submode rewrites the anchor fields as a set — edge/until stay hidden
+    // because each mode owns them (end+clock vs start+tier_window).
+    const setMode = (wantTime: boolean) => {
+      if (wantTime === time) return;
+      update(
+        wantTime
+          ? { until: "clock", clock: rule.clock || "07:00" }
+          : { until: "tier_window", clock: "" },
+      );
+    };
+    return html`
+      <div class="anchor-grid">
+        <ha-select
+          .label=${localize("tou.arrive_mode_label", l)}
+          .value=${time ? "time" : "coast"}
+          .options=${[
+            { value: "coast", label: localize("tou.arrive_mode.coast", l) },
+            { value: "time", label: localize("tou.arrive_mode.time", l) },
+          ]}
+          @selected=${(e: Event) => {
+            const v = getSelectValue(e);
+            if (v !== null) setMode(v === "time");
+          }}
+          @closed=${(e: Event) => e.stopPropagation()}
+          fixedMenuPosition
+        ></ha-select>
+        <ha-select
+          .label=${localize(time ? "tou.charge_during" : "tou.coast_through", l)}
+          .value=${rule.tier === TIER_ANY ? "" : rule.tier}
+          .options=${TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) }))}
+          @selected=${(e: Event) => {
+            const v = getSelectValue(e);
+            if (v !== null) update({ tier: v as TouTier });
+          }}
+          @closed=${(e: Event) => e.stopPropagation()}
+          fixedMenuPosition
+        ></ha-select>
       </div>
     `;
   }
@@ -1020,6 +1140,87 @@ export class RsTouSection extends LitElement {
     this._emit("tou_overrides", rows);
   }
 
+  // ---- Computed windows (preview mirror of TouManager._compile_schedules) ----
+
+  /** The [start, end) windows this rule compiles on the previewed tariff
+   * timeline. Card-authored shapes only (phase after, no from_tier): an
+   * arrive row's anchor is inferred from its clock exactly like
+   * TouManager._rule_records does, so the line never shows a shape the
+   * engine would not run. */
+  private _windowsFor(def: TouRuleDef): { start: number; end: number }[] {
+    const segs = this._previewSegments;
+    if (!segs.length) return [];
+    const horizonEnd = segs[segs.length - 1][1];
+    const bounds: { ts: number; from: string; to: string }[] = [];
+    for (let i = 0; i + 1 < segs.length; i++) {
+      bounds.push({ ts: segs[i][1], from: segs[i][2], to: segs[i + 1][2] });
+    }
+    const arriveClock = def.action === "arrive" && String(def.clock ?? "").trim() !== "";
+    const edge = def.action === "arrive" ? (arriveClock ? "end" : "start") : def.edge;
+    const until = def.action === "arrive" ? (arriveClock ? "clock" : "window") : def.until;
+    const days = def.days ?? [];
+    const out: { start: number; end: number }[] = [];
+    for (let i = 0; i < bounds.length; i++) {
+      const b = bounds[i];
+      if (def.tier !== "any" && (edge === "start" ? b.to : b.from) !== def.tier) continue;
+      if (days.length && !days.includes(WEEKDAYS[(new Date(b.ts * 1000).getDay() + 6) % 7].value))
+        continue;
+      if (!boundaryBetweenOk(b.ts, def.between)) continue;
+      let end: number | null = null;
+      if (until === "minutes") {
+        const duration = def.minutes ?? 0;
+        end = duration > 0 ? b.ts + duration * 60 : null;
+      } else if (until === "clock") {
+        const mins = hhmmToMinutes(def.clock ?? "");
+        if (mins !== null) {
+          const d = new Date(b.ts * 1000);
+          d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+          end = d.getTime() / 1000;
+          if (end <= b.ts) end += 86400;
+        }
+      } else {
+        end = i + 1 < bounds.length ? bounds[i + 1].ts : horizonEnd;
+      }
+      if (end !== null && b.ts < horizonEnd && end > b.ts) {
+        out.push({ start: b.ts, end: Math.min(end, horizonEnd) });
+      }
+    }
+    return out;
+  }
+
+  /** One plain-language line: which side the rule steers and when, next.
+   * This is the anchor's answer spelled out in clock time — a mis-picked
+   * period or edge shows up here as an implausible window, not as a silent
+   * surprise at 3 a.m. */
+  private _renderWindowBadge(rule: TouRuleDef, l: string) {
+    if (!this._previewSegments.length) return nothing;
+    const sides: string[] = [];
+    if (rule.heat != null) sides.push(localize("tou.override_side.heat", l));
+    if (rule.cool != null) sides.push(localize("tou.override_side.cool", l));
+    if (!sides.length) return nothing;
+    const wins = this._windowsFor(rule);
+    const now = Date.now() / 1000;
+    const next = wins.find((w) => w.end > now);
+    if (!next) return html`<div class="hint">${localize("tou.window_none", l)}</div>`;
+    const fmt = (ts: number) =>
+      new Date(ts * 1000).toLocaleTimeString(this.hass.language || undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    const hours = (next.end - next.start) / 3600;
+    const dur =
+      hours < 1 ? `${Math.round(hours * 60)} min` : `${hours.toFixed(1).replace(/\.0$/, "")} h`;
+    return html`<div class="hint">
+      ${localize("tou.window_next", l, {
+        side: sides.join(" + "),
+        start: fmt(next.start),
+        end: fmt(next.end),
+        dur,
+        count: wins.length,
+      })}
+    </div>`;
+  }
+
   // ---- Summary ----
 
   /** Compact one-line description of a rule, display units. */
@@ -1040,7 +1241,9 @@ export class RsTouSection extends LitElement {
     const action = localize(`tou.override_action.${rule.action}`, l);
     let end: string;
     if (rule.action === "arrive") {
-      end = `${localize("tou.override_arrive_by", l)} ${rule.clock || "--:--"}`;
+      end = this._isTimeArrive(rule)
+        ? `${localize("tou.override_arrive_by", l)} ${rule.clock}`
+        : localize("tou.arrive_coast_end", l);
     } else if (rule.until === "minutes") {
       end = `${localize("tou.override_until.minutes_short", l)} ${rule.minutes ?? 0}`;
     } else if (rule.until === "clock") {
@@ -1048,7 +1251,10 @@ export class RsTouSection extends LitElement {
     } else {
       end = localize("tou.override_until.tier_window", l);
     }
-    return `${tier} · ${edge} · ${action} · ${sides.join(" / ")} · ${end}`;
+    // An arrive rule's edge is decided by its submode, not authored — showing
+    // "Period starts/ends" would only echo a forced field (or the wrong one).
+    const parts = rule.action === "arrive" ? [tier, action] : [tier, edge, action];
+    return `${parts.join(" · ")} · ${sides.join(" / ")} · ${end}`;
   }
 
   private _boostSuffix(l: string): string {

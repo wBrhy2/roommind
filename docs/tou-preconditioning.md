@@ -188,7 +188,11 @@ For every matching change in the timeline the row computes a window:
   change itself must fall inside.
 - **Action**: `Override target temperature to`, `Increase target
   temperature temporarily by`, `Decrease target temperature temporarily by`,
-  or `Reach target temperature by time` (see below).
+  or `Reach target temperature by time`. The first three anchor on a period
+  boundary as *starts/ends*; "reach by time" replaces the anchor pair with an
+  **Arrive** choice — charge during a named period and reach the target by a
+  clock time, or coast through a named period and reach it at the period's end
+  (see below).
 - **Heating / Cooling**: one value per mode, each optional. A blank side
   means the row is skipped in that mode — a heating-only row leaves cooling
   entirely alone (plain tier shaping still applies there).
@@ -243,26 +247,46 @@ loses rules.
 ### Reach target temperature by time
 
 The decay-derived action for the classic "heat during the cheap window, arrive
-comfortable at the door" case. Example: ultra-low ends at 07:00, you leave at
-09:00 and the room must be at 20 °C when you go — but heating should *stop* at
-07:00, not trickle through the morning. The row says `(ultra-low · ends)`
-`(reach 20 °C by 09:00)` `(heating 20 °C)` and RoomMind derives the
-temperature the room must already have at the boundary from your learned room
-model:
+comfortable at the door" case. It comes in two modes, chosen by the **Arrive**
+selector on the row:
 
-    needed(t) = outdoor + (20 − outdoor) · e^(α · (09:00 − t))
+- **By a time of day** — pick the period that carries the energy under *Charge
+  during* and set the clock under *Arrive by*. Example: ultra-low ends at 07:00,
+  you leave at 09:00 and the room must be at 20 °C when you go — but heating
+  should *stop* at 07:00, not trickle through the morning. The row says
+  `(Charge during ultra-low)` `(reach 20 °C by 09:00)` and RoomMind derives the
+  temperature the room must already have at the boundary from your learned room
+  model:
 
-with α the room's learned heat-loss rate. A room losing a degree every ten
-hours against a −2 °C morning needs roughly 21.4 °C at 07:00 to coast to
-exactly 20 °C by 09:00. That derived value is the *indirect* 07:00 target —
-you never schedule it. The MPC replans it every cycle against the forecast,
-so the pre-charge lands in the cheap window and the schedule series stays
-continuous at the arrival instant. If the room decays faster than the model
-predicted, small top-ups are allowed rather than arriving cold: comfort at
-09:00 is the promise, zero energy in between is the best effort.
+      needed(t) = outdoor + (20 − outdoor) · e^(α · (09:00 − t))
+
+  with α the room's learned heat-loss rate. A room losing a degree every ten
+  hours against a −2 °C morning needs roughly 21.4 °C at 07:00 to coast to
+  exactly 20 °C by 09:00. That derived value is the *indirect* 07:00 target —
+  you never schedule it. The MPC replans it every cycle against the forecast,
+  so the pre-charge lands in the cheap window and the schedule series stays
+  continuous at the arrival instant.
+
+- **When a period ends** — pick the expensive period under *Coast through* and
+  leave the clock empty: the room must land on the target exactly as that
+  period ends, coasting through it on stored heat. Example: pre-charge during
+  mid-peak so the evening peak rides down to 19 °C at its end instead of
+  buying heat at peak prices. (Whether a pre-charge happens at all is the
+  model's call: on a mild day the passive coast already lands high enough and
+  the row demands nothing.)
+
+If the room decays faster than the model predicted, small top-ups are allowed
+rather than arriving cold: the temperature at arrival is the promise, zero
+energy in between is the best effort.
 
 While the room's thermal model is still immature the row degrades gracefully
 to holding the flat target (classic coast behavior), and the card says so.
+
+One authoring note: an arrive row anchored to a period **start** with a clock
+means "coast begins the moment the period starts" — i.e. no conditioning at all
+during the cheap window you meant to charge in. The card's *Charge during* /
+*Coast through* selectors keep the anchor consistent by construction, so the
+combination cannot be authored from the card.
 
 ### Advanced global records
 
@@ -297,7 +321,8 @@ tier timeline; the panel shows the active tier.
 5. Card schedule row "Evening peak push-out": (Peak · starts) (Override target
    temperature to) heating 18 °C (cooling blank), holds until the next period
    change.
-6. Card schedule row "Warm for the door": (Ultra-low · ends) (Reach target
-   temperature by time) heating 20 °C, arrive by 09:00 — RoomMind derives the
-   boundary temperature from the learned decay so heating stops when the
-   cheap window ends and the room is exactly 20 °C at departure.
+6. Card schedule row "Warm for the door": (Reach target temperature by time)
+   (Arrive: at a time of day) (Charge during Ultra-low) (heating 20 °C) (Arrive
+   by 09:00) — RoomMind derives the boundary temperature from the learned decay
+   so heating stops when the cheap window ends and the room is exactly 20 °C at
+   departure.

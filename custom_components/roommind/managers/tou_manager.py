@@ -81,7 +81,6 @@ AdjustFn = Callable[[float, TargetTemps], TargetTemps]
 DecayFn = tuple[float, float]
 
 
-
 def normalize_period_state(state: str) -> str:
     """Map a period sensor state (any tariff wording) onto a RoomMind tier.
 
@@ -165,7 +164,6 @@ def _arrive_candidate(
     dt_hours = max(window["end"] - ts, 0.0) / 3600.0
     exponent = min(max(alpha * dt_hours, 0.0), TOU_ARRIVAL_EXPONENT_CAP)
     return t_out + (temp - t_out) * math.exp(exponent)
-
 
 
 def _active_window(windows: list[dict[str, Any]], ts: float) -> dict[str, Any] | None:
@@ -873,17 +871,33 @@ class TouManager:
 
         A blank side means the rule is skipped in that mode entirely, so a
         heating adjustment can never command cooling. "arrive" schedules the
-        decay-derived action: the window runs from the tier boundary to the
-        wall-clock arrival time, holding the flat temp until the learned
-        model can derive the boundary temperature.
+        decay-derived action in two modes: by a wall-clock time (window runs
+        from the charge period's end to the clock) or coasting through the
+        anchored period (window = the period itself, arrival at its end).
+        Both hold the flat temp until the learned model can derive the
+        boundary temperature.
         """
         action = str(rule.get("action") or "")
         if action not in ("set", "raise", "lower", "arrive"):
             return []
         until = str(rule.get("until") or "tier_window")
+        edge = str(rule.get("edge") or "start")
         if action == "arrive":
-            rec_until, rec_clock, rec_minutes = "clock", str(rule.get("clock") or ""), 0
-            if not rec_clock:
+            # Two arrival modes share the decay curve, keyed by whether an
+            # arrival clock exists: "reach by HH:MM" coasts from the charge
+            # period's end to that time (anchor = the period ending — heating
+            # stops at the boundary and stored heat carries the room), while a
+            # period-end arrival rides the whole anchored period and lands at
+            # the next change. A fixed duration is meaningless for an arrival
+            # promise, and an empty "clock" end has nothing to reach.
+            rec_clock = str(rule.get("clock") or "")
+            if rec_clock:
+                rec_until, rec_minutes = "clock", 0
+                edge = "end"
+            elif until == "tier_window":
+                rec_until, rec_clock, rec_minutes = "window", "", 0
+                edge = "start"
+            else:
                 return []
         elif until == "minutes":
             rec_until, rec_clock, rec_minutes = "minutes", "", rule.get("minutes") or 0
@@ -916,7 +930,7 @@ class TouManager:
                     "side": side,
                     "tier": str(rule.get("tier") or "any"),
                     "from_tier": "",
-                    "edge": str(rule.get("edge") or "start"),
+                    "edge": edge,
                     "phase": "after",
                     "minutes": rec_minutes,
                     "until": rec_until,
@@ -1055,7 +1069,6 @@ class TouManager:
             room = rooms.get(area)
             records = global_records + (self.row_records(room, rules) if isinstance(room, dict) else [])
             windows = self._compile_schedules(area, settings, timeline, records)
-
 
             rows: list[dict[str, Any]] = []
             for side in ("heat", "cool"):
