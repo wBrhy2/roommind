@@ -97,6 +97,7 @@ async def test_list_rooms_empty(ws_hass, store, connection):
             "coil_dry_min_cooling_minutes": 10,
             "coil_dry_drain_minutes": 0,
             "compressor_groups": [],
+            "tou_rules": [],
         },
     )
 
@@ -3541,7 +3542,7 @@ async def test_save_settings_tou_rate_windows_invalid(ws_hass, store, connection
 
 @pytest.mark.asyncio
 async def test_save_room_tou_overrides(ws_hass, store, connection):
-    """Tariff schedule rows persist on the room, including blank sides."""
+    """Card rows upsert shared rules and persist as thin references (definitions stripped)."""
     await store.async_load()
 
     msg = {
@@ -3549,113 +3550,250 @@ async def test_save_room_tou_overrides(ws_hass, store, connection):
         "type": "roommind/rooms/save",
         "area_id": "living_room_abc12345",
         "thermostats": ["climate.living_room"],
+        "tou_schedule_enabled": True,
         "tou_overrides": [
             {
-                "id": "cool-only",
-                "name": "Relax cooling only",
-                "tier": "peak",
-                "edge": "start",
-                "action": "set",
-                "heat": None,
-                "cool": 26.0,
-                "until": "minutes",
-                "minutes": 120,
+                "id": "row-cool",
+                "rule_id": "rl-cool",
+                "enabled": True,
+                "definition": {
+                    "name": "Relax cooling only",
+                    "tier": "peak",
+                    "edge": "start",
+                    "action": "set",
+                    "heat": None,
+                    "cool": 26.0,
+                    "until": "minutes",
+                    "minutes": 120,
+                },
             },
             {
-                "id": "nine",
-                "name": "Warm by nine",
-                "tier": "ultra_low",
-                "edge": "end",
-                "action": "arrive",
-                "heat": 20.0,
-                "cool": None,
-                "clock": "09:00",
+                "id": "row-nine",
+                "rule_id": "rl-nine",
+                "enabled": True,
+                "definition": {
+                    "name": "Warm by nine",
+                    "tier": "ultra_low",
+                    "edge": "end",
+                    "action": "arrive",
+                    "heat": 20.0,
+                    "cool": None,
+                    "until": "clock",
+                    "clock": "09:00",
+                },
             },
         ],
     }
     await _save_room(ws_hass, connection, msg)
+
     room = connection.send_result.call_args[0][1]["room"]
-    assert room["tou_overrides"][0]["heat"] is None
-    assert room["tou_overrides"][0]["cool"] == 26.0
-    assert room["tou_overrides"][1]["action"] == "arrive"
-    assert room["tou_overrides"][1]["clock"] == "09:00"
+    assert room["tou_schedule_enabled"] is True
+    assert room["tou_overrides"] == [
+        {"id": "row-cool", "rule_id": "rl-cool", "enabled": True},
+        {"id": "row-nine", "rule_id": "rl-nine", "enabled": True},
+    ]
+    library = {r["id"]: r for r in store.get_settings()["tou_rules"]}
+    assert library["rl-cool"]["name"] == "Relax cooling only"
+    assert library["rl-cool"]["cool"] == 26.0
+    assert library["rl-nine"]["action"] == "arrive"
+    assert library["rl-nine"]["clock"] == "09:00"
 
 
 @pytest.mark.asyncio
-async def test_save_room_tou_override_needs_one_side(ws_hass, store, connection):
-    """A row blank on both sides is rejected — disabling is what the toggle is for."""
+async def test_save_room_tou_override_validation(ws_hass, store, connection):
+    """Definitions face the same integrity checks the inline rows had."""
     await store.async_load()
 
-    msg = {
-        "id": 69,
-        "type": "roommind/rooms/save",
-        "area_id": "living_room_abc12345",
-        "thermostats": ["climate.living_room"],
-        "tou_overrides": [
-            {
-                "id": "empty",
-                "name": "empty",
-                "tier": "peak",
-                "action": "set",
-                "heat": None,
-                "cool": None,
-                "until": "tier_window",
-            }
-        ],
-    }
-    await _save_room(ws_hass, connection, msg)
+    def msg(rid: int, overrides: list) -> dict:
+        return {
+            "id": rid,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room_abc12345",
+            "thermostats": ["climate.living_room"],
+            "tou_overrides": overrides,
+        }
 
-    assert connection.send_result.call_count == 0
+    no_sides = {"id": "e", "rule_id": "x", "definition": {"name": "n", "tier": "peak", "action": "set"}}
+    await _save_room(ws_hass, connection, msg(69, [no_sides]))
     assert connection.send_error.call_args[0][1] == "invalid_tou_override"
 
-
-@pytest.mark.asyncio
-async def test_save_room_tou_override_value_checks(ws_hass, store, connection):
-    """Arrive needs a clock, set needs a sane temperature, raise/lower a delta range."""
-    await store.async_load()
-
     arrive_no_clock = {
-        "id": 70,
-        "type": "roommind/rooms/save",
-        "area_id": "living_room_abc12345",
-        "thermostats": ["climate.living_room"],
-        "tou_overrides": [{"id": "a", "name": "x", "tier": "peak", "action": "arrive", "heat": 20.0, "clock": ""}],
+        "id": "a",
+        "rule_id": "x",
+        "definition": {"name": "n", "tier": "peak", "action": "arrive", "heat": 20.0, "clock": ""},
     }
-    await _save_room(ws_hass, connection, arrive_no_clock)
+    await _save_room(ws_hass, connection, msg(70, [arrive_no_clock]))
     assert connection.send_error.call_args[0][1] == "invalid_tou_override"
 
     hot = {
-        "id": 71,
-        "type": "roommind/rooms/save",
-        "area_id": "living_room_abc12345",
-        "thermostats": ["climate.living_room"],
-        "tou_overrides": [{"id": "s", "name": "x", "tier": "peak", "action": "set", "heat": 110.0}],
+        "id": "s",
+        "rule_id": "x",
+        "definition": {"name": "n", "tier": "peak", "action": "set", "heat": 110.0},
     }
-    await _save_room(ws_hass, connection, hot)
+    await _save_room(ws_hass, connection, msg(71, [hot]))
     assert connection.send_error.call_args[0][1] == "invalid_tou_override"
 
     big_delta = {
-        "id": 72,
-        "type": "roommind/rooms/save",
-        "area_id": "living_room_abc12345",
-        "thermostats": ["climate.living_room"],
-        "tou_overrides": [{"id": "d", "name": "x", "tier": "peak", "action": "raise", "heat": 9.0}],
+        "id": "d",
+        "rule_id": "x",
+        "definition": {"name": "n", "tier": "peak", "action": "raise", "heat": 9.0},
     }
-    await _save_room(ws_hass, connection, big_delta)
+    await _save_room(ws_hass, connection, msg(72, [big_delta]))
     assert connection.send_error.call_args[0][1] == "invalid_tou_override"
 
-    dup = {
-        "id": 73,
+    naked_ref = {"id": "r", "rule_id": "", "enabled": True}
+    await _save_room(ws_hass, connection, msg(73, [naked_ref]))
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+    dup = [
+        {"id": "same", "rule_id": "a", "enabled": True},
+        {"id": "same", "rule_id": "b", "enabled": True},
+    ]
+    await _save_room(ws_hass, connection, msg(74, dup))
+    assert connection.send_error.call_args[0][1] == "duplicate_tou_override_id"
+
+
+@pytest.mark.asyncio
+async def test_save_room_tou_rule_propagate_fork_merge(ws_hass, store, connection):
+    """Shared rules propagate; a rename forks; renaming onto a taken name merges."""
+    await store.async_load()
+
+    def save(rid: int, area: str, overrides: list, *, enabled: bool = True) -> dict:
+        return {
+            "id": rid,
+            "type": "roommind/rooms/save",
+            "area_id": area,
+            "thermostats": ["climate.living_room"],
+            "tou_schedule_enabled": enabled,
+            "tou_overrides": overrides,
+        }
+
+    relax = {"name": "peak relax", "tier": "peak", "edge": "start", "action": "set", "heat": 18.0, "until": "tier_window"}
+    # Room A creates the shared rule.
+    await _save_room(ws_hass, connection, save(80, "living_room_abc12345", [
+        {"id": "rowA", "rule_id": "rule-relax", "enabled": True, "definition": relax}
+    ]))
+    assert {r["id"] for r in store.get_settings()["tou_rules"]} == {"rule-relax"}
+
+    # Editing keeps the name: the library entry updates (propagates).
+    edited = {**relax, "heat": 17.5}
+    await _save_room(ws_hass, connection, save(81, "living_room_abc12345", [
+        {"id": "rowA", "rule_id": "rule-relax", "enabled": True, "definition": edited}
+    ]))
+    assert store.get_settings()["tou_rules"][0]["heat"] == 17.5
+
+    # Room B references the same rule without a definition.
+    await _save_room(ws_hass, connection, save(82, "living_room", [
+        {"id": "rowB", "rule_id": "rule-relax", "enabled": True}
+    ]))
+
+    # Room A renames the rule: forks a derivative; room B keeps the original.
+    await _save_room(ws_hass, connection, save(83, "living_room_abc12345", [
+        {"id": "rowA", "rule_id": "rule-relax", "enabled": True,
+         "definition": {**edited, "name": "evening relax"}}
+    ]))
+    library = store.get_settings()["tou_rules"]
+    assert {r["name"] for r in library} == {"peak relax", "evening relax"}
+    forked = next(r for r in library if r["name"] == "evening relax")
+    assert forked["id"] != "rule-relax"
+    assert store.get_room("living_room_abc12345")["tou_overrides"][0]["rule_id"] == forked["id"]
+    assert store.get_room("living_room")["tou_overrides"][0]["rule_id"] == "rule-relax"
+
+    # Renaming the fork back onto the taken name merges: incoming definition wins,
+    # every reference repoints to the canonical id ("applies to both rooms").
+    await _save_room(ws_hass, connection, save(84, "living_room_abc12345", [
+        {"id": "rowA", "rule_id": forked["id"], "enabled": True,
+         "definition": {**edited, "name": "peak relax", "heat": 19.0}}
+    ]))
+    library = store.get_settings()["tou_rules"]
+    assert len(library) == 1
+    assert library[0]["id"] == "rule-relax"
+    assert library[0]["heat"] == 19.0
+    assert store.get_room("living_room_abc12345")["tou_overrides"][0]["rule_id"] == "rule-relax"
+    assert store.get_room("living_room")["tou_overrides"][0]["rule_id"] == "rule-relax"
+
+
+@pytest.mark.asyncio
+async def test_save_room_tou_rules_prune_on_last_reference(ws_hass, store, connection):
+    """A rule survives disabled rooms but is pruned when the last reference goes."""
+    await store.async_load()
+
+    def save(rid: int, overrides: list, *, enabled: bool) -> dict:
+        return {
+            "id": rid,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room_abc12345",
+            "thermostats": ["climate.living_room"],
+            "tou_schedule_enabled": enabled,
+            "tou_overrides": overrides,
+        }
+
+    row = {
+        "id": "row1",
+        "rule_id": "solo",
+        "enabled": True,
+        "definition": {"name": "temp measure", "tier": "peak", "edge": "start", "action": "set", "heat": 18.0},
+    }
+    await _save_room(ws_hass, connection, save(85, [row], enabled=True))
+    assert store.get_settings()["tou_rules"]
+
+    # Section switched off for a while: the row keeps counting, the rule stays.
+    await _save_room(ws_hass, connection, save(86, [{"id": "row1", "rule_id": "solo", "enabled": True}], enabled=False))
+    assert [r["id"] for r in store.get_settings()["tou_rules"]] == ["solo"]
+
+    # Removing the row is the act of deleting the rule: pruned.
+    await _save_room(ws_hass, connection, save(87, [], enabled=False))
+    assert store.get_settings()["tou_rules"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_room_prunes_tou_rules(ws_hass, store, connection):
+    """Deleting the room that alone references a rule prunes the library."""
+    await store.async_load()
+
+    await _save_room(ws_hass, connection, {
+        "id": 88,
         "type": "roommind/rooms/save",
         "area_id": "living_room_abc12345",
         "thermostats": ["climate.living_room"],
+        "tou_schedule_enabled": True,
         "tou_overrides": [
-            {"id": "same", "name": "x", "tier": "peak", "action": "set", "heat": 18.0},
-            {"id": "same", "name": "y", "tier": "off", "action": "set", "heat": 18.0},
+            {
+                "id": "row1",
+                "rule_id": "only-here",
+                "enabled": True,
+                "definition": {"name": "x", "tier": "peak", "edge": "start", "action": "set", "heat": 18.0},
+            }
         ],
-    }
-    await _save_room(ws_hass, connection, dup)
-    assert connection.send_error.call_args[0][1] == "duplicate_tou_override_id"
+    })
+    assert store.get_settings()["tou_rules"]
+
+    await _delete_room(ws_hass, connection, {
+        "id": 89,
+        "type": "roommind/rooms/delete",
+        "area_id": "living_room_abc12345",
+    })
+    assert store.get_settings()["tou_rules"] == []
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_rules_direct(ws_hass, store, connection):
+    """Direct library edits validate ids, names and definitions."""
+    await store.async_load()
+
+    good = {"id": "g1", "name": "solo", "tier": "peak", "edge": "start", "action": "set", "heat": 18.0}
+    msg = {"id": 90, "type": "roommind/settings/save", "tou_rules": [good]}
+    await _save_settings(ws_hass, connection, msg)
+    connection.send_result.assert_called_once()
+    assert connection.send_result.call_args[0][1]["settings"]["tou_rules"] == [good]
+
+    dup = {"id": "g2", "name": "solo", "tier": "off", "edge": "start", "action": "set", "heat": 17.0}
+    await _save_settings(ws_hass, connection, {"id": 91, "type": "roommind/settings/save", "tou_rules": [good, dup]})
+    assert connection.send_error.call_args[0][1] == "duplicate_tou_rule_name"
+
+    bad = {"id": "g3", "name": "nonsense", "tier": "peak", "edge": "start", "action": "sundial", "heat": 18.0}
+    await _save_settings(ws_hass, connection, {"id": 92, "type": "roommind/settings/save", "tou_rules": [bad]})
+    assert connection.send_error.call_args[0][1] == "invalid_tou_rule"
 
 
 @pytest.mark.asyncio

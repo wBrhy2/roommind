@@ -689,7 +689,6 @@
   "tou.room_max_boost_hint": "Zur billigen Energiespeicherung wird nie darüber geheizt.",
   "tou.room_boost_unoccupied": "Anhebung auch bei Abwesenheit",
   "tou.room_boost_unoccupied_hint": "Vorladen auch, wenn der Raum leer oder niemand zuhause ist.",
-  "tou.add_override": "Zeile hinzufügen",
   "tou.arrive_model_note": "Die Temperatur, die der Raum beim Zeitraumwechsel haben muss, wird aus dem gelernten Raummodell abgeleitet, damit der Raum genau zur Ankunftszeit an das Ziel driftet. Solange das Modell unsicher ist, hält die Zeile das flache Ziel.",
   "tou.card_schedule_hint": "Das Planen passiert auf den Geräte-Karten: Wähle dort einen Tarifzeitraum, und RoomMind verankert die Aktion an dessen Grenzen.",
   "tou.override_action.arrive": "Zieltemperatur erreichen bis Uhrzeit",
@@ -724,6 +723,15 @@
   "tou.override_until_label": "Gilt",
   "tou.schedule_hint": "Temporäre Ziel-Overrides, die an einen Tarifzeitraum gebunden sind statt an die Uhrzeit. Der normale Zeitplan und alle anderen Regeln steuern weiter Heizung und Kühlung – eine Zeile verbiegt das Ziel nur, solange sie aktiv ist.",
   "tou.schedule_title": "Tarifplan",
+  "tou.new_rule": "Neue Regel",
+  "tou.pick_rule": "Zeile hinzufügen",
+  "tou.pick_rule_hint": "Kopieren nutzt eine bestehende gemeinsame Regel (eine Änderung wirkt in allen Räumen mit dieser Regel); eine neue Regel gehört diesem Raum, bis ein anderer Raum sie verwendet.",
+  "tou.rename_hint": "Umbenennen erstellt eine Kopie für diesen Raum – außer der Name entspricht einer bestehenden Regel, dann werden beide zu einer gemeinsamen Regel.",
+  "tou.rule_missing": "Die Regel dieser Zeile existiert nicht mehr – Zeile entfernen oder Regel neu anlegen.",
+  "tou.rule_used_in": "In {count} Räumen verwendet – Änderungen gelten für alle.",
+  "tou.schedule_empty": "Noch keine Zeilen. Unten eine hinzufügen.",
+  "tou.schedule_enabled_label": "Tarifplan für diesen Raum aktivieren",
+  "tou.schedule_off_hint": "Der Tarifplan ist für diesen Raum ausgeschaltet – seine Regeln bleiben gespeichert, greifen aber nicht.",
   "settings.intro.tou": "Verknüpfe eine Stromtarif-Quelle und forme Raumziele nach Nutzungszeit. Räume halten Komfort, wo Energie günstig ist, und rollen teure Fenster mit gespeicherter Wärme aus. Das funktioniert auch mit Helfern oder Kalendern für Sonderfälle – etwa ein lokales Microgrid, das mit verschiedenen Kraftstoffen Strom erzeugt, oder um überschüssigen Solarstrom als thermische Masse zu speichern.",
   "room.section.tou": "Zeitnutzung"
 }

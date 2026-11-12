@@ -1,6 +1,7 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import type { HomeAssistant, HassArea, RoomConfig, RoomWithoutArea } from "./types";
+import type { HomeAssistant, HassArea, RoomConfig, RoomWithoutArea, TouRule } from "./types";
+
 import { getEntitiesForArea } from "./utils/room-state";
 import { loadHaElements } from "./load-ha-elements";
 import { localize } from "./utils/localize";
@@ -57,6 +58,9 @@ export class RoomMindPanel extends LitElement {
   @state() private _anyoneHome = true;
   @state() private _presencePersons: string[] = [];
   @state() private _presenceAwayAction: "eco" | "off" = "eco";
+  /** Shared tariff rule library (settings.tou_rules) for the device cards. */
+  @state() private _touRules: TouRule[] = [];
+
   @state() private _saveStatus: "idle" | "saving" | "saved" | "error" = "idle";
   @state() private _roomOrder: string[] = [];
   @state() private _groupByFloor = false;
@@ -497,6 +501,8 @@ export class RoomMindPanel extends LitElement {
             .coilDryMinutes=${this._coilDryMinutes}
             .coilDryMode=${this._coilDryMode}
             .coilDryFanMode=${this._coilDryFanMode}
+            .rooms=${this._rooms}
+            .touRules=${this._touRules}
             @back-clicked=${this._onBackFromDetail}
             @room-updated=${this._onRoomUpdated}
           ></rs-room-detail>
@@ -805,6 +811,7 @@ export class RoomMindPanel extends LitElement {
         coil_dry_minutes: number;
         coil_dry_mode: string;
         coil_dry_fan_mode: string;
+        tou_rules: TouRule[];
       }>({
         type: "roommind/rooms/list",
       });
@@ -827,6 +834,7 @@ export class RoomMindPanel extends LitElement {
       this._anyoneHome = result.anyone_home ?? true;
       this._presencePersons = result.presence_persons ?? [];
       this._presenceAwayAction = result.presence_away_action ?? "eco";
+      this._touRules = result.tou_rules ?? [];
     } catch (err) {
       // eslint-disable-next-line no-console
       console.debug("[RoomMind] loadRooms:", err);

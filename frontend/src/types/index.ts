@@ -118,22 +118,23 @@ export type TouLookahead = "auto" | "calendar" | "next_change_rate" | "next_chan
 /** What an override row does to the resolved schedule target. "arrive" is the
  * decay-derived action: the room must coast to the value exactly at the
  * arrival clock time with conditioning stopped from the tier boundary; until
- * the thermal model is learned the row holds the flat temperature. */
+ * the thermal model is learned the rule holds the flat temperature. */
 export type TouOverrideAction = "set" | "raise" | "lower" | "arrive";
 
-/** How long a non-arrive override row holds after its tier boundary. */
+/** How long a non-arrive rule holds after its tier boundary. */
 export type TouOverrideUntil = "tier_window" | "minutes" | "clock";
 
-/** One tariff-schedule row authored on the device card: (tier) (edge)
- * (action) (heat) (cool) (end). A blank side skips that mode. Backend
- * expansion: TouManager.row_records. */
-export interface TouOverride {
+/** One entry of the shared tariff rule library (`settings.tou_rules`).
+ * The rule's name is its identity: same name means the same rule in every
+ * room. Editing it from one card propagates; renaming to a fresh name forks
+ * a derivative; renaming onto a taken name merges (incoming wins).
+ * Backend expansion: TouManager.row_records. */
+export interface TouRule {
   id: string;
   name: string;
-  enabled: boolean;
-  /** Which tariff tier's boundary anchors the row; "any" = every change. */
+  /** Which tariff tier's boundary anchors the rule; "any" = every change. */
   tier: TouTier | "any";
-  /** Whether the row fires when the tier starts or when it ends. */
+  /** Whether the rule fires when the tier starts or when it ends. */
   edge: "start" | "end";
   action: TouOverrideAction;
   /** °C target for set/arrive, Δ°C for raise/lower; null/undefined = skip. */
@@ -148,6 +149,16 @@ export interface TouOverride {
   days?: string[];
   /** Restrict to boundaries whose local time falls in this clock range. */
   between?: { from: string; to: string } | null;
+}
+
+/** One row on the device card: a thin reference into the shared library.
+ * `definition` rides along only while the card creates or edits the rule
+ * (the server upserts it into the library and strips it from the room). */
+export interface TouOverrideRow {
+  id: string;
+  rule_id: string;
+  enabled: boolean;
+  definition?: TouRule;
 }
 
 export interface TouCalendarBinding {
@@ -242,8 +253,10 @@ export interface RoomConfig {
   tou_mode?: TouMode;
   tou_max_boost?: number | null;
   tou_boost_unoccupied?: boolean;
-  /** Tariff-schedule rows edited on the device card. */
-  tou_overrides?: TouOverride[];
+  /** Section gate: off hides the schedule and the rows cannot steer the room. */
+  tou_schedule_enabled?: boolean;
+  /** Tariff-schedule rows: references into the shared rule library. */
+  tou_overrides?: TouOverrideRow[];
   live?: RoomLiveData;
 }
 
@@ -311,6 +324,8 @@ export interface GlobalSettings {
   tou_clamp_min?: number;
   tou_clamp_max?: number;
   tou_coast_max_minutes?: number;
+  /** Shared tariff rule library; cards reference entries by rule_id. */
+  tou_rules?: TouRule[];
   room_order?: string[];
   group_by_floor?: boolean;
   boost_applied_at?: Record<string, number>;

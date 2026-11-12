@@ -12,7 +12,8 @@ import type {
   DeviceType,
   DeviceRole,
   TouMode,
-  TouOverride,
+  TouOverrideRow,
+  TouRule,
 } from "../types";
 import "./rs-hero-status";
 import "./rs-climate-mode-selector";
@@ -106,7 +107,12 @@ export class RsRoomDetail extends LitElement {
   @state() private _touMode: TouMode = "off";
   @state() private _touMaxBoost = 28;
   @state() private _touBoostUnoccupied = false;
-  @state() private _touOverrides: TouOverride[] = [];
+  @state() private _touScheduleEnabled = false;
+  @state() private _touOverrides: TouOverrideRow[] = [];
+
+  /** All rooms + the shared rule library, for the tariff schedule editor. */
+  @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
+  @property({ attribute: false }) public touRules: TouRule[] = [];
   @state() private _optimisticCoverResume = false;
 
   private _prevAreaId: string | null = null;
@@ -317,6 +323,7 @@ export class RsRoomDetail extends LitElement {
       this._touMode = this.config.tou_mode ?? "off";
       this._touMaxBoost = this.config.tou_max_boost ?? 28;
       this._touBoostUnoccupied = this.config.tou_boost_unoccupied ?? false;
+      this._touScheduleEnabled = this.config.tou_schedule_enabled ?? false;
       this._touOverrides = this.config.tou_overrides ?? [];
     } else {
       this._devices = [];
@@ -365,6 +372,7 @@ export class RsRoomDetail extends LitElement {
       this._touMode = "off";
       this._touMaxBoost = 28;
       this._touBoostUnoccupied = false;
+      this._touScheduleEnabled = false;
       this._touOverrides = [];
     }
     this._dirty = false;
@@ -668,7 +676,11 @@ export class RsRoomDetail extends LitElement {
                     .touMode=${this._touMode}
                     .touMaxBoost=${this._touMaxBoost}
                     .touBoostUnoccupied=${this._touBoostUnoccupied}
+                    .scheduleEnabled=${this._touScheduleEnabled}
                     .overrides=${this._touOverrides}
+                    .rules=${this.touRules}
+                    .allRooms=${this.rooms}
+                    .areaId=${this.area.area_id}
                     @setting-changed=${this._onTouSettingChanged}
                   ></rs-tou-section>
                 </rs-section-card>`
@@ -970,7 +982,11 @@ export class RsRoomDetail extends LitElement {
             .touMode=${this._touMode}
             .touMaxBoost=${this._touMaxBoost}
             .touBoostUnoccupied=${this._touBoostUnoccupied}
+            .scheduleEnabled=${this._touScheduleEnabled}
             .overrides=${this._touOverrides}
+            .rules=${this.touRules}
+            .allRooms=${this.rooms}
+            .areaId=${this.area.area_id}
             @setting-changed=${this._onTouSettingChanged}
           ></rs-tou-section>
         </rs-edit-dialog>`;
@@ -1192,7 +1208,8 @@ export class RsRoomDetail extends LitElement {
     if (key === "tou_mode") this._touMode = value as TouMode;
     else if (key === "tou_max_boost") this._touMaxBoost = value as number;
     else if (key === "tou_boost_unoccupied") this._touBoostUnoccupied = value as boolean;
-    else if (key === "tou_overrides") this._touOverrides = value as TouOverride[];
+    else if (key === "tou_schedule_enabled") this._touScheduleEnabled = value as boolean;
+    else if (key === "tou_overrides") this._touOverrides = value as TouOverrideRow[];
     this._autoSave();
   }
 
@@ -1275,6 +1292,7 @@ export class RsRoomDetail extends LitElement {
         tou_mode: this._touMode,
         tou_max_boost: this._touMaxBoost,
         tou_boost_unoccupied: this._touBoostUnoccupied,
+        tou_schedule_enabled: this._touScheduleEnabled,
         tou_overrides: this._touOverrides,
       });
 

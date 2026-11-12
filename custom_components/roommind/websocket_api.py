@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import voluptuous as vol
@@ -133,6 +134,158 @@ def _hhmm_ok(text: str) -> bool:
     return 0 <= int(parts[0]) <= 23 and 0 <= int(parts[1]) <= 59
 
 
+# Shared tariff rule definition fields (settings["tou_rules"] entries, and the
+# optional `definition` a card row carries while the rule is being created or
+# edited). heat/cool hold a °C target for set/arrive and a Δ for raise/lower;
+# a blank side skips that mode. See TouManager.row_records for compilation.
+_TOU_RULE_DEF_FIELDS = {
+    vol.Required("name"): str,
+    vol.Optional("tier", default="any"): vol.In([*TOU_TIERS, "any"]),
+    vol.Optional("edge", default="start"): vol.In(TOU_EDGES),
+    vol.Required("action"): vol.In(TOU_ROW_ACTIONS),
+    vol.Optional("heat"): vol.Any(None, vol.Coerce(float)),
+    vol.Optional("cool"): vol.Any(None, vol.Coerce(float)),
+    vol.Optional("until", default="tier_window"): vol.In(TOU_ROW_UNTILS),
+    vol.Optional("minutes", default=0): vol.Coerce(int),
+    vol.Optional("clock", default=""): str,
+    vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
+    vol.Optional("between", default=None): vol.Any(
+        None,
+        {vol.Required("from"): str, vol.Required("to"): str},
+    ),
+}
+
+
+def _tou_rule_def_error(defn: dict) -> str | None:
+    """Validate one tariff rule definition; return an error message or None."""
+    name = str(defn.get("name") or "").strip()
+    if not name:
+        return "Tariff rules need a name"
+    action = str(defn.get("action") or "")
+    if action not in TOU_ROW_ACTIONS:
+        return f"Unknown action '{action}'"
+    sides = [v for v in (defn.get("heat"), defn.get("cool")) if v is not None]
+    if not sides:
+        return "Tariff rules need a heating or a cooling value"
+    if action in ("set", "arrive") and not all(
+        TOU_SCHEDULE_TEMP_MIN <= float(v) <= TOU_SCHEDULE_TEMP_MAX for v in sides
+    ):
+        return f"'{action}' needs temperatures {TOU_SCHEDULE_TEMP_MIN:g}-{TOU_SCHEDULE_TEMP_MAX:g} °C"
+    if action in ("raise", "lower") and not all(
+        TOU_SCHEDULE_SHIFT_MIN <= abs(float(v)) <= TOU_SCHEDULE_SHIFT_MAX for v in sides
+    ):
+        return f"'{action}' needs deltas {TOU_SCHEDULE_SHIFT_MIN:g}-{TOU_SCHEDULE_SHIFT_MAX:g} °C"
+    until = str(defn.get("until") or "tier_window")
+    if until not in TOU_ROW_UNTILS:
+        return f"Unknown end '{until}'"
+    if action == "arrive" or until == "clock":
+        if not _hhmm_ok(str(defn.get("clock") or "")):
+            return "'clock' end needs 'HH:MM'"
+    if until == "minutes" and not (
+        TOU_SCHEDULE_MINUTES_MIN <= int(defn.get("minutes") or 0) <= TOU_SCHEDULE_MINUTES_MAX
+    ):
+        return f"Minute ends need {TOU_SCHEDULE_MINUTES_MIN}-{TOU_SCHEDULE_MINUTES_MAX} minutes"
+    between = defn.get("between")
+    if between and not (_hhmm_ok(str(between.get("from") or "")) and _hhmm_ok(str(between.get("to") or ""))):
+        return "'between' needs 'HH:MM' values"
+    return None
+
+
+async def _async_upsert_tou_rules(hass: HomeAssistant, rows: list[dict]) -> None:
+    """Apply card row definitions to the shared rule library.
+
+    The rule's name is its identity: same name means the same rule in every
+    room. Unchanged name → propagate the edit to every room referencing it.
+    New name → fork a derivative, this room alone repoints. Name that already
+    belongs to another rule → merge: the incoming definition overwrites the
+    canonical entry and every reference to the old id repoints to it, so the
+    rename onto an existing name applies to all rooms sharing it.
+    """
+    store = hass.data[DOMAIN]["store"]
+    library = [r for r in (store.get_settings().get("tou_rules") or []) if isinstance(r, dict)]
+    by_id = {str(r.get("id", "")): r for r in library}
+    by_name = {str(r.get("name", "")).strip(): r for r in library}
+    remaps: dict[str, str] = {}  # old rule id -> canonical id (merge)
+    changed = False
+    for row in rows:
+        defn = row.get("definition")
+        if not isinstance(defn, dict):
+            continue
+        # The card may echo the id it knows; ids are library-owned, never
+        # client-carried (a merge would otherwise rewrite the canonical id).
+        defn = {k: v for k, v in defn.items() if k != "id"}
+        name = str(defn.get("name") or "").strip()
+        rid = str(row.get("rule_id") or "")
+        existing = by_id.get(rid)
+        same_name = by_name.get(name)
+        if same_name is not None and same_name is not existing:
+            canonical_id = str(same_name["id"])
+            same_name.clear()
+            same_name.update({"id": canonical_id, **defn, "name": name})
+            if existing is not None:
+                # merged away: every room pointing at the old id follows
+                library.remove(existing)
+                by_id.pop(rid, None)
+                remaps[rid] = canonical_id
+                by_name.pop(str(existing.get("name", "")).strip(), None)
+            by_name[name] = same_name
+            row["rule_id"] = canonical_id
+            changed = True
+        elif existing is not None and str(existing.get("name", "")).strip() == name:
+            existing.clear()
+            existing.update({"id": rid, **defn, "name": name})
+            changed = True
+        else:
+            # fork (renamed away from a still-shared rule) or brand-new rule
+            new_id = uuid.uuid4().hex if (existing is not None or not rid) else rid
+            entry: dict = {"id": new_id, **defn, "name": name}
+            library.append(entry)
+            by_id[new_id] = entry
+            by_name[name] = entry
+            row["rule_id"] = new_id
+            changed = True
+
+    if not changed and not remaps:
+        return
+    await store.async_save_settings({"tou_rules": library})
+    # Merge repoints other rooms' rows too (same name, same rule everywhere).
+    if remaps:
+        for area_id, room in store.get_rooms().items():
+            room_rows = room.get("tou_overrides") or []
+            if any(str(r.get("rule_id") or "") in remaps for r in room_rows if isinstance(r, dict)):
+                updated = [
+                    {**r, "rule_id": remaps.get(str(r.get("rule_id") or ""), str(r.get("rule_id") or ""))}
+                    if isinstance(r, dict)
+                    else r
+                    for r in room_rows
+                ]
+                await store.async_update_room(area_id, {"tou_overrides": updated})
+
+
+async def _async_prune_tou_rules(hass: HomeAssistant) -> None:
+    """Drop shared rules no room row references anymore.
+
+    Reference counting is state-blind: a room whose schedule or Time-of-Use
+    is switched off still holds its rows, and through them the rules — a
+    temporary measure never loses data. Only removing the row or the room
+    drops the count.
+    """
+    store = hass.data[DOMAIN]["store"]
+    library = store.get_settings().get("tou_rules") or []
+    if not isinstance(library, list) or not library:
+        return
+    referenced = {
+        str(row.get("rule_id") or "")
+        for room in store.get_rooms().values()
+        for row in (room.get("tou_overrides") or [])
+        if isinstance(row, dict)
+    }
+    kept = [e for e in library if isinstance(e, dict) and str(e.get("id")) in referenced]
+    if len(kept) != len(library):
+        await store.async_save_settings({"tou_rules": kept})
+
+
+
 def _get_coordinator(hass: HomeAssistant) -> RoomMindCoordinator | None:
     """Return the RoomMindCoordinator from hass.data, or None."""
     coordinator: RoomMindCoordinator | None = hass.data.get(DOMAIN, {}).get("coordinator")
@@ -193,6 +346,7 @@ _ROOM_SAVE_FIELDS = (
     "tou_boost_unoccupied",
     "schedule_blocks",
     "tou_overrides",
+    "tou_schedule_enabled",
 )
 
 _SETTINGS_SAVE_FIELDS = (
@@ -260,6 +414,7 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_clamp_max",
     "tou_coast_max_minutes",
     "tou_schedules",
+    "tou_rules",
 )
 
 
@@ -432,6 +587,7 @@ async def websocket_list_rooms(
             ),
             "coil_dry_drain_minutes": settings.get("coil_dry_drain_minutes", DEFAULT_COIL_DRY_DRAIN_MINUTES),
             "compressor_groups": settings.get("compressor_groups", []),
+            "tou_rules": settings.get("tou_rules", []),
         },
     )
 
@@ -551,28 +707,20 @@ async def websocket_list_rooms(
                 },
             }
         ],
-        # Tariff schedule rows edited on the device card: (tier) (action)
-        # (heat) (cool) (end). heat/cool carry a °C target for set/arrive and
-        # a Δ for raise/lower; a blank side skips that mode (see
-        # TouManager.row_records for the expansion into engine records).
+        vol.Optional("tou_schedule_enabled"): bool,
+        # Tariff schedule rows edited on the device card: thin references into
+        # the shared rule library (settings["tou_rules"]) with a per-row
+        # enabled toggle. `definition` rides along only while the card creates
+        # or edits the rule; _async_upsert_tou_rules applies it (propagate /
+        # fork on rename / merge onto a same-named rule) and it is never
+        # stored on the room. Rows in the ignored pre-release inline format
+        # (no rule_id) are dropped by the next save.
         vol.Optional("tou_overrides"): [
             {
                 vol.Required("id"): str,
-                vol.Required("name"): str,
+                vol.Required("rule_id"): str,
                 vol.Optional("enabled", default=True): bool,
-                vol.Optional("tier", default="any"): vol.In([*TOU_TIERS, "any"]),
-                vol.Optional("edge", default="start"): vol.In(TOU_EDGES),
-                vol.Required("action"): vol.In(TOU_ROW_ACTIONS),
-                vol.Optional("heat"): vol.Any(None, vol.Coerce(float)),
-                vol.Optional("cool"): vol.Any(None, vol.Coerce(float)),
-                vol.Optional("until", default="tier_window"): vol.In(TOU_ROW_UNTILS),
-                vol.Optional("minutes", default=0): vol.Coerce(int),
-                vol.Optional("clock", default=""): str,
-                vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
-                vol.Optional("between", default=None): vol.Any(
-                    None,
-                    {vol.Required("from"): str, vol.Required("to"): str},
-                ),
+                vol.Optional("definition"): _TOU_RULE_DEF_FIELDS,
             }
         ],
     }
@@ -626,67 +774,38 @@ async def websocket_save_room(
                 connection.send_error(msg["id"], "invalid_schedule_block_value", "'shift' blocks need a direction")
                 return
 
-    # Tariff schedule rows (device card): coherent per-action values and anchors
+    # Tariff schedule rows (device card): rows are references into the shared
+    # library; an attached definition is validated, upserted, and then stripped
+    # so only the thin reference is stored on the room.
     overrides = config.get("tou_overrides")
     if overrides:
-        override_ids = [str(o.get("id", "")) for o in overrides]
-        if len(override_ids) != len(set(override_ids)):
+        row_ids = [str(r.get("id", "")) for r in overrides]
+        if len(row_ids) != len(set(row_ids)):
             connection.send_error(msg["id"], "duplicate_tou_override_id", "Tariff schedule IDs must be unique")
             return
-        for o in overrides:
-            action = str(o.get("action") or "")
-            if action not in TOU_ROW_ACTIONS:
-                connection.send_error(msg["id"], "invalid_tou_override", f"Unknown action '{action}'")
-                return
-            sides = [v for v in (o.get("heat"), o.get("cool")) if v is not None]
-            if not sides and o.get("enabled", True):
-                connection.send_error(
-                    msg["id"],
-                    "invalid_tou_override",
-                    "Tariff schedule rows need a heating or a cooling value — or disable the row",
-                )
-                return
-            if action in ("set", "arrive") and not all(
-                isinstance(v, (int, float)) and TOU_SCHEDULE_TEMP_MIN <= float(v) <= TOU_SCHEDULE_TEMP_MAX
-                for v in sides
-            ):
-                connection.send_error(
-                    msg["id"],
-                    "invalid_tou_override",
-                    f"'{action}' needs temperatures {TOU_SCHEDULE_TEMP_MIN:g}-{TOU_SCHEDULE_TEMP_MAX:g} °C",
-                )
-                return
-            if action in ("raise", "lower") and not all(
-                isinstance(v, (int, float)) and TOU_SCHEDULE_SHIFT_MIN <= abs(float(v)) <= TOU_SCHEDULE_SHIFT_MAX
-                for v in sides
-            ):
-                connection.send_error(
-                    msg["id"],
-                    "invalid_tou_override",
-                    f"'{action}' needs deltas {TOU_SCHEDULE_SHIFT_MIN:g}-{TOU_SCHEDULE_SHIFT_MAX:g} °C",
-                )
-                return
-            until = str(o.get("until") or "tier_window")
-            if until not in TOU_ROW_UNTILS:
-                connection.send_error(msg["id"], "invalid_tou_override", f"Unknown end '{until}'")
-                return
-            if action == "arrive" or until == "clock":
-                if not _hhmm_ok(str(o.get("clock") or "")):
-                    connection.send_error(msg["id"], "invalid_tou_override", "'clock' end needs 'HH:MM'")
+        for r in overrides:
+            defn = r.get("definition")
+            if defn is not None:
+                err = _tou_rule_def_error(defn)
+                if err:
+                    connection.send_error(msg["id"], "invalid_tou_override", err)
                     return
-            if until == "minutes" and not (
-                TOU_SCHEDULE_MINUTES_MIN <= int(o.get("minutes") or 0) <= TOU_SCHEDULE_MINUTES_MAX
-            ):
+            elif not str(r.get("rule_id") or ""):
                 connection.send_error(
                     msg["id"],
                     "invalid_tou_override",
-                    f"Minute ends need {TOU_SCHEDULE_MINUTES_MIN}-{TOU_SCHEDULE_MINUTES_MAX} minutes",
+                    "A schedule row must reference a rule or carry its definition",
                 )
                 return
-            between = o.get("between")
-            if between and not (_hhmm_ok(str(between.get("from") or "")) and _hhmm_ok(str(between.get("to") or ""))):
-                connection.send_error(msg["id"], "invalid_tou_override", "'between' needs 'HH:MM' values")
-                return
+        # Upsert now (before the room write): the merge remap loop repoints
+        # other rooms' rows, and this room's rows were already mutated to the
+        # canonical ids, so the save below stores the final references.
+        await _async_upsert_tou_rules(hass, overrides)
+    # Definitions are library state, never room state: store thin references.
+    config["tou_overrides"] = [
+        {k: v for k, v in r.items() if k != "definition"} if isinstance(r, dict) else r
+        for r in (config.get("tou_overrides") or [])
+    ]
 
     if ("thermostats" in config or "acs" in config) and "devices" not in config:
         _LOGGER.warning(
@@ -699,6 +818,8 @@ async def websocket_save_room(
     room = await store.async_save_room(area_id, config)
     new_valves = get_valve_entities(room.get("devices", []))
     await _async_release_dropped_valves(hass, area_id, old_valves, new_valves)
+    if overrides is not None:
+        await _async_prune_tou_rules(hass)
 
     # Notify coordinator to create/update sensor entities for the room
     coordinator = _get_coordinator(hass)
@@ -780,6 +901,8 @@ async def async_remove_room(hass: HomeAssistant, area_id: str) -> bool:
         await coordinator.async_room_removed(area_id)
     # Stored right away, after the in-memory model is gone: else it only went with the next thermal save
     await store.async_clear_thermal_data_room(area_id)
+    # The room's rows are gone: shared rules nothing references anymore are pruned.
+    await _async_prune_tou_rules(hass)
     return True
 
 
@@ -1076,6 +1199,16 @@ async def websocket_get_settings(
                 },
             }
         ],
+        # Shared tariff rule library (settings["tou_rules"]): the single source
+        # of truth card rows reference by rule_id. Advanced direct edits are
+        # validated here; the normal authoring path is the device card's
+        # embedded `definition` upsert in websocket_save_room.
+        vol.Optional("tou_rules"): [
+            {
+                vol.Required("id"): str,
+                **_TOU_RULE_DEF_FIELDS,
+            }
+        ],
     }
 )
 @websocket_api.async_response
@@ -1193,6 +1326,25 @@ async def websocket_save_settings(
                     "invalid_tou_window_days",
                     f"Tariff window days must be weekday names, not {bad}",
                 )
+                return
+
+    # Shared tariff rule library direct edit: unique ids and names, coherent
+    # definitions. Pruning stays on the room channels, so rules pre-seeded
+    # through this path survive until the first card save claims (or drops) them.
+    rules = changes.get("tou_rules")
+    if rules is not None:
+        rule_ids = [str(r.get("id", "")) for r in rules]
+        if len(rule_ids) != len(set(rule_ids)):
+            connection.send_error(msg["id"], "duplicate_tou_rule_id", "Tariff rule IDs must be unique")
+            return
+        rule_names = [str(r.get("name", "")).strip() for r in rules]
+        if len(rule_names) != len(set(rule_names)):
+            connection.send_error(msg["id"], "duplicate_tou_rule_name", "Tariff rule names must be unique")
+            return
+        for r in rules:
+            err = _tou_rule_def_error(r)
+            if err:
+                connection.send_error(msg["id"], "invalid_tou_rule", err)
                 return
 
     # Tariff schedules: value/lead/clock/until/between checks.

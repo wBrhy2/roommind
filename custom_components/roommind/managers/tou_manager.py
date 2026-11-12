@@ -10,8 +10,12 @@ calendars, or plain tier flags), builds a per-cycle tier timeline, and exposes:
   stops at the tier boundary and the learned thermal model coasts the room
   through the expensive window on stored heat (mirrored for cooling).
   Windows come from two sources: the advanced global ``tou_schedules``
-  records and the room's ``tou_overrides`` rows — the tariff schedule a user
-  authors on the device card as (tier) (action) (heat) (cool) (end).
+  records and the room's ``tou_overrides`` rows — thin references
+  (``{id, rule_id, enabled}``) into the shared rule library
+  (``settings["tou_rules"]``) that the user authors on the device card as
+  (tier) (action) (heat) (cool) (end); same name means same rule in every
+  room. The per-room ``tou_schedule_enabled`` toggle gates the whole
+  schedule.
 * ``make_price_builder`` — per-block energy-price multipliers that scale the
   MPC optimizer's ``w_energy`` term, biasing runs into cheap tiers.
 * ``snapshot`` — current tier/rate/next-change for the global energy sensors
@@ -708,7 +712,7 @@ class TouManager:
             return None
 
         area_id = str(room.get("area_id", ""))
-        records = self.schedules(settings) + self.row_records(room)
+        records = self.schedules(settings) + self.row_records(room, self.rule_library(settings))
         tariff_windows = self._compile_schedules(area_id, settings, timeline, records)
         user_blocks = room.get("schedule_blocks") or []
         clamp_min = float(settings.get("tou_clamp_min", DEFAULT_TOU_CLAMP_MIN))
@@ -822,74 +826,103 @@ class TouManager:
         return []
 
     @staticmethod
-    def row_records(room: dict[str, Any]) -> list[dict[str, Any]]:
-        """Expand a room's tariff-schedule rows (``tou_overrides``) into records.
+    def rule_library(settings: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """Shared tariff rule definitions (``settings["tou_rules"]``) keyed by id."""
+        out: dict[str, dict[str, Any]] = {}
+        for rule in settings.get("tou_rules") or []:
+            if isinstance(rule, dict) and rule.get("id"):
+                out[str(rule["id"])] = rule
+        return out
 
-        One card row is authored as (tier) (action) (heat) (cool) (end); a
-        blank side means the row skips that mode entirely, mirroring the old
-        coast-rule semantics. The row fans out into at most one record per
-        side so a heating adjustment can never command cooling. "arrive"
-        rows schedule the decay-derived action: the window runs from the
-        tier boundary to the wall-clock arrival time, holding the flat temp
-        until the learned model can derive the boundary temperature.
+    @staticmethod
+    def row_records(room: dict[str, Any], rules: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        """Expand a room's schedule rows into engine records via the shared library.
+
+        Rows are thin references ``{id, rule_id, enabled}``; the definition
+        lives once in ``settings["tou_rules"]``, so editing a rule propagates
+        to every room that references it — same name, same rule everywhere.
+        A row with no rule (dangling reference, or the ignored pre-release
+        inline format lacking a rule_id) compiles to nothing. The section
+        toggle (``tou_schedule_enabled``) gates the whole schedule: a
+        disabled section cannot steer the room, but its rows stay in place,
+        so switching it back on brings the rules with it (temporary
+        measures never lose data).
         """
+        if not room.get("tou_schedule_enabled", False):
+            return []
         area_id = str(room.get("area_id", ""))
         out: list[dict[str, Any]] = []
         for row in room.get("tou_overrides") or []:
             if not isinstance(row, dict) or not row.get("enabled", True):
                 continue
-            action = str(row.get("action") or "")
-            if action not in ("set", "raise", "lower", "arrive"):
+            rule = rules.get(str(row.get("rule_id") or ""))
+            if rule is None:
                 continue
-            until = str(row.get("until") or "tier_window")
-            if action == "arrive":
-                rec_until, rec_clock, rec_minutes = "clock", str(row.get("clock") or ""), 0
-                if not rec_clock:
-                    continue
-            elif until == "minutes":
-                rec_until, rec_clock, rec_minutes = "minutes", "", row.get("minutes") or 0
-            elif until == "clock":
-                rec_until, rec_clock, rec_minutes = "clock", str(row.get("clock") or ""), 0
-            else:
-                rec_until, rec_clock, rec_minutes = "window", "", 0
-            rid = str(row.get("id") or "r")
-            for side in ("heat", "cool"):
-                temp = row.get(side)
-                if not isinstance(temp, (int, float)) or isinstance(temp, bool):
-                    continue  # blank side: the row skips this mode
-                if action == "set":
-                    value: dict[str, Any] = {"mode": "set", "temp": float(temp)}
-                elif action == "arrive":
-                    value = {"mode": "arrive", "temp": float(temp)}
-                else:
-                    value = {
-                        "mode": "shift",
-                        "direction": "raise" if action == "raise" else "lower",
-                        "delta": abs(float(temp)),
-                    }
-                out.append(
-                    {
-                        "id": f"{rid}-{side}",
-                        "name": str(row.get("name") or ""),
-                        "enabled": True,
-                        "rooms": [area_id],
-                        "side": side,
-                        "tier": str(row.get("tier") or "any"),
-                        "from_tier": "",
-                        "edge": str(row.get("edge") or "start"),
-                        "phase": "after",
-                        "minutes": rec_minutes,
-                        "until": rec_until,
-                        "until_tier": "",
-                        "clock": rec_clock,
-                        "between": row.get("between"),
-                        "days": [d for d in (row.get("days") or []) if isinstance(d, str)],
-                        "guard": False,
-                        "value": value,
-                    }
-                )
+            out.extend(TouManager._rule_records(rule, area_id))
         return out
 
+    @staticmethod
+    def _rule_records(rule: dict[str, Any], area_id: str) -> list[dict[str, Any]]:
+        """Fan one library rule out into at most one engine record per side.
+
+        A blank side means the rule is skipped in that mode entirely, so a
+        heating adjustment can never command cooling. "arrive" schedules the
+        decay-derived action: the window runs from the tier boundary to the
+        wall-clock arrival time, holding the flat temp until the learned
+        model can derive the boundary temperature.
+        """
+        action = str(rule.get("action") or "")
+        if action not in ("set", "raise", "lower", "arrive"):
+            return []
+        until = str(rule.get("until") or "tier_window")
+        if action == "arrive":
+            rec_until, rec_clock, rec_minutes = "clock", str(rule.get("clock") or ""), 0
+            if not rec_clock:
+                return []
+        elif until == "minutes":
+            rec_until, rec_clock, rec_minutes = "minutes", "", rule.get("minutes") or 0
+        elif until == "clock":
+            rec_until, rec_clock, rec_minutes = "clock", str(rule.get("clock") or ""), 0
+        else:
+            rec_until, rec_clock, rec_minutes = "window", "", 0
+        rid = str(rule.get("id") or "r")
+        out: list[dict[str, Any]] = []
+        for side in ("heat", "cool"):
+            temp = rule.get(side)
+            if not isinstance(temp, (int, float)) or isinstance(temp, bool):
+                continue  # blank side: the rule skips this mode
+            if action == "set":
+                value: dict[str, Any] = {"mode": "set", "temp": float(temp)}
+            elif action == "arrive":
+                value = {"mode": "arrive", "temp": float(temp)}
+            else:
+                value = {
+                    "mode": "shift",
+                    "direction": "raise" if action == "raise" else "lower",
+                    "delta": abs(float(temp)),
+                }
+            out.append(
+                {
+                    "id": f"{rid}-{side}",
+                    "name": str(rule.get("name") or ""),
+                    "enabled": True,
+                    "rooms": [area_id],
+                    "side": side,
+                    "tier": str(rule.get("tier") or "any"),
+                    "from_tier": "",
+                    "edge": str(rule.get("edge") or "start"),
+                    "phase": "after",
+                    "minutes": rec_minutes,
+                    "until": rec_until,
+                    "until_tier": "",
+                    "clock": rec_clock,
+                    "between": rule.get("between"),
+                    "days": [d for d in (rule.get("days") or []) if isinstance(d, str)],
+                    "guard": False,
+                    "value": value,
+                }
+            )
+        return out
 
     def _compile_schedules(
         self,
@@ -1002,6 +1035,7 @@ class TouManager:
             return None
         global_records = self.schedules(settings)
         rooms = rooms or {}
+        rules = self.rule_library(settings)
         if area_id is None:
             areas = sorted(
                 {str(a) for rec in global_records for a in (rec.get("rooms") or []) if str(a)}
@@ -1013,8 +1047,9 @@ class TouManager:
         fire_stats: dict[str, dict[str, Any]] = {}
         for area in areas:
             room = rooms.get(area)
-            records = global_records + (self.row_records(room) if isinstance(room, dict) else [])
+            records = global_records + (self.row_records(room, rules) if isinstance(room, dict) else [])
             windows = self._compile_schedules(area, settings, timeline, records)
+
 
             rows: list[dict[str, Any]] = []
             for side in ("heat", "cool"):

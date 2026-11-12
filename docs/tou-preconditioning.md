@@ -157,12 +157,17 @@ Turn it off if you only want the plain tier setback/boost.
 ## Tariff schedule (device card)
 
 Scheduling by time of use happens on the room's device card, under its
-Time-of-Use section. Each row is a temporary target override anchored on a
-tariff *period* instead of the clock: pick a tier and whether the row fires
-when the period **starts** or **ends**, choose an action and a heating and/or
-cooling value, and say how long the hold lasts. The normal schedule and every
-other rule keep controlling the room — a row only bends the target while it
-holds.
+Time-of-Use section. The section is gated by a toggle (like the outdoor-area
+switch): when it is off, no rule of the schedule acts on the room — the rows
+stay saved so switching it off is a safe temporary measure, never a data loss.
+When it is on, each row is a temporary target override anchored on a tariff
+*period* instead of the clock: pick a tier and whether the row fires when the
+period **starts** or **ends**, choose an action and a heating and/or cooling
+value, and say how long the hold lasts. The normal schedule and every other
+rule keep controlling the room — a row only bends the target while it holds.
+
+Rows reference **shared rules** (see below) — the card edits one named rule
+and rooms pick it from the list.
 
 For every matching change in the timeline the row computes a window:
 
@@ -189,6 +194,27 @@ windows, mold, compressor protection) keeps its priority.
 
 Cooling mirrors heating: relax the cooling target during the peak and let the
 room drift up, or pre-cool in a cheap window.
+
+### Shared rules
+
+A rule is authored once and referenced by every room's row: definitions live
+in the integration's store (the shared rule library, `settings.tou_rules`),
+rooms keep thin references `{row, rule_id, enabled}`. Same name always means
+the same rule:
+
+- **Editing a rule** from any card updates the single shared definition — the
+  card shows "used in N rooms" so the blast radius is visible before you type.
+- **Renaming to a fresh name** forks a derivative: this room gets its own copy
+  and the other rooms keep the original.
+- **Renaming onto an existing rule's name** merges: the definition you just
+  edited wins and every room referencing either name now shares one rule.
+- **The row toggle** (enabled) stays per-room — one room can park a shared
+  rule without switching it off in the others.
+
+A rule is pruned automatically when the last reference to it disappears —
+deleting the row, or deleting the room. Switching a room's schedule (or its
+whole Time-of-Use mode) off keeps every reference: a temporary measure never
+loses rules.
 
 ### Reach target temperature by time
 

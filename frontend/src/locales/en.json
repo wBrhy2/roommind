@@ -689,7 +689,6 @@
   "tou.room_max_boost_hint": "The model never heats above this to store cheap energy.",
   "tou.room_boost_unoccupied": "Boost even when nobody is here",
   "tou.room_boost_unoccupied_hint": "Pre-charge also while the room is empty or everyone is away.",
-  "tou.add_override": "Add row",
   "tou.arrive_model_note": "The temperature the room must have at the period change is derived from the learned room model, so the room coasts to the target exactly at the arrival time. Until the model is confident, the row holds the flat target.",
   "tou.card_schedule_hint": "Scheduling lives on the device cards: pick a tariff period there and RoomMind anchors the action to its boundaries.",
   "tou.override_action.arrive": "Reach target temperature by time",
@@ -724,6 +723,15 @@
   "tou.override_until_label": "Holds",
   "tou.schedule_hint": "Temporary target overrides anchored on a tariff period instead of the clock. The normal schedule and all other rules keep controlling heating and cooling — a row only bends the target while it holds.",
   "tou.schedule_title": "Tariff schedule",
+  "tou.new_rule": "New rule",
+  "tou.pick_rule": "Add a row",
+  "tou.pick_rule_hint": "Copying reuses an existing shared rule (an edit propagates to every room using it); a new rule belongs to this room until another references it.",
+  "tou.rename_hint": "Renaming forks a copy for this room — unless the name matches an existing rule, then both become one shared rule.",
+  "tou.rule_missing": "This row's rule no longer exists — remove the row or add the rule again.",
+  "tou.rule_used_in": "Used in {count} rooms — changes apply to all of them.",
+  "tou.schedule_empty": "No rows yet. Add one below.",
+  "tou.schedule_enabled_label": "Enable tariff schedule for this room",
+  "tou.schedule_off_hint": "The tariff schedule is switched off for this room — its rules stay saved, they just do not act.",
   "settings.intro.tou": "Link an electricity tariff source and shape room targets by time of use. Rooms keep comfort where energy is cheap and coast on stored heat where it is expensive. This feature can also be used with helpers or a calendar for other edge cases such as with a local microgrid that uses different fuels to generate power, or to store excess solar generation as thermal mass.",
   "room.section.tou": "Time-of-Use"
 }
