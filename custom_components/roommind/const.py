@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "1.9.0-beta.10"
+VERSION = "1.9.0-beta.11"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -259,7 +259,8 @@ TOU_TIERS = [TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW]
 TOU_MODE_OFF = "off"
 TOU_MODE_SETBACK = "setback"
 TOU_MODE_SETBACK_BOOST = "setback_boost"
-TOU_MODES = [TOU_MODE_OFF, TOU_MODE_SETBACK, TOU_MODE_SETBACK_BOOST]
+TOU_MODE_BOOST_ONLY = "boost_only"
+TOU_MODES = [TOU_MODE_OFF, TOU_MODE_SETBACK, TOU_MODE_SETBACK_BOOST, TOU_MODE_BOOST_ONLY]
 
 # Which entity class the panel treats as THE source for the current tier and
 # for future-tier lookahead. "auto" = legacy cascade (period -> flags -> rate;

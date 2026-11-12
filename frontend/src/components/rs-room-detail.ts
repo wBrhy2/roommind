@@ -14,6 +14,7 @@ import type {
   TouMode,
   TouOverrideRow,
   TouRule,
+  TouShaping,
 } from "../types";
 import "./rs-hero-status";
 import "./rs-climate-mode-selector";
@@ -113,6 +114,12 @@ export class RsRoomDetail extends LitElement {
   /** All rooms + the shared rule library, for the tariff schedule editor. */
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
   @property({ attribute: false }) public touRules: TouRule[] = [];
+  @property({ attribute: false }) public touShaping: TouShaping = {
+    mid_setback_delta: 2,
+    boost_delta: 2,
+    peak_heat_floor: 18,
+    peak_cool_ceiling: 28,
+  };
   @state() private _optimisticCoverResume = false;
 
   private _prevAreaId: string | null = null;
@@ -679,6 +686,7 @@ export class RsRoomDetail extends LitElement {
                     .scheduleEnabled=${this._touScheduleEnabled}
                     .overrides=${this._touOverrides}
                     .rules=${this.touRules}
+                    .shaping=${this.touShaping}
                     .allRooms=${this.rooms}
                     .areaId=${this.area.area_id}
                     @setting-changed=${this._onTouSettingChanged}
@@ -985,6 +993,7 @@ export class RsRoomDetail extends LitElement {
             .scheduleEnabled=${this._touScheduleEnabled}
             .overrides=${this._touOverrides}
             .rules=${this.touRules}
+            .shaping=${this.touShaping}
             .allRooms=${this.rooms}
             .areaId=${this.area.area_id}
             @setting-changed=${this._onTouSettingChanged}

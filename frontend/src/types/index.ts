@@ -104,7 +104,17 @@ export type ConflictResolution =
 export type TouTier = "peak" | "mid" | "off" | "ultra_low";
 
 /** Per-room participation in tariff-aware control. */
-export type TouMode = "off" | "setback" | "setback_boost";
+export type TouMode = "off" | "setback" | "setback_boost" | "boost_only";
+
+/** Global shaping defaults (Settings -> Time-of-Use), shipped to the room
+ * cards so a setback note can show the depth the room will actually relax
+ * to. °C internally like every other temperature in the store. */
+export interface TouShaping {
+  mid_setback_delta: number;
+  boost_delta: number;
+  peak_heat_floor: number;
+  peak_cool_ceiling: number;
+}
 
 /** Which source class answers the current tier ("auto" = legacy cascade). */
 export type TouTierSource = "auto" | "period" | "rate" | "flags";

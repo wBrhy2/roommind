@@ -25,7 +25,8 @@ Safety rules encoded by the adjuster:
 * a manual override at the timestamp is never shaved by tariff logic;
 * "off" targets (None sides) stay off;
 * setback never *raises* demand; boost never *lowers* it;
-* boost only for ``setback_boost`` rooms, not during vacation, and only when
+* boost only for rooms whose mode charges (``setback_boost``/``boost_only``),
+  not during vacation, and only when
   occupied unless ``tou_boost_unoccupied`` is set;
 * heat-lowering steps are skipped while mold prevention is active;
 * every shift is guarded by the clamp band without overriding user targets
@@ -706,7 +707,7 @@ class TouManager:
         """
         timeline = self._timeline
         mode = str(room.get("tou_mode", "off"))
-        if timeline is None or mode == "off" or mode not in ("setback", "setback_boost"):
+        if timeline is None or mode not in ("setback", "setback_boost", "boost_only"):
             return None
         if timeline.current_tier == TOU_TIER_UNKNOWN and not self._has_tiered_events(timeline):
             return None
@@ -723,7 +724,12 @@ class TouManager:
         boost_delta = float(settings.get("tou_boost_delta", DEFAULT_TOU_BOOST_DELTA))
         boost_cap = room.get("tou_max_boost")
         boost_cap = float(boost_cap) if isinstance(boost_cap, (int, float)) else clamp_max
-        boost_allowed = mode == "setback_boost"
+        # Participation postures: setback relaxes demand in mid/peak tiers,
+        # boost pre-charges in ultra-low windows. "setback_boost" does both,
+        # "boost_only" charges cheap and never relaxes, "setback" never
+        # charges above the schedule.
+        boost_allowed = mode in ("setback_boost", "boost_only")
+        setback_allowed = mode in ("setback", "setback_boost")
         occupied = not room_vacant and not presence_away or bool(room.get("tou_boost_unoccupied", False))
 
         override_heat = room.get("override_heat")
@@ -751,16 +757,16 @@ class TouManager:
             tier = timeline.tier_at(ts)
             shaped_heat, shaped_cool = heat, cool
             if heat is not None:
-                if tier == TOU_TIER_PEAK and not mold_active:
+                if tier == TOU_TIER_PEAK and setback_allowed and not mold_active:
                     shaped_heat = min(heat, peak_floor)
-                elif tier == TOU_TIER_MID and not mold_active:
+                elif tier == TOU_TIER_MID and setback_allowed and not mold_active:
                     shaped_heat = max(heat - mid_delta, min(heat, clamp_min))
                 elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
                     shaped_heat = max(min(heat + boost_delta, boost_cap), heat)
             if cool is not None:
-                if tier == TOU_TIER_PEAK:
+                if tier == TOU_TIER_PEAK and setback_allowed:
                     shaped_cool = max(cool, peak_ceiling)
-                elif tier == TOU_TIER_MID:
+                elif tier == TOU_TIER_MID and setback_allowed:
                     shaped_cool = min(cool + mid_delta, max(cool, clamp_max))
                 elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
                     shaped_cool = min(max(cool - boost_delta, min(cool, clamp_min)), cool)

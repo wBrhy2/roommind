@@ -130,6 +130,16 @@ Each room (except outdoor rooms) has a **Time-of-Use mode**:
 - `Setback + boost` — additionally pre-charges during ultra-low tiers: heat
   rises up to **Highest pre-charge target**, cooling dips, so the following
   peak runs on stored comfort.
+- `Boost only` — the reverse posture: ultra-low tiers pre-charge exactly as
+  `Setback + boost` does, but mid/peak tiers leave the schedule untouched —
+  the room charges cheap and never relaxes on its own.
+
+How far a participating room actually shifts is not per-room: the setback
+depths and peak limits come from the shaping defaults in
+`Settings -> Time-of-Use` (fine-tune), and the card shows the current values
+under the mode selector so you can see what the posture will do. The only
+per-room shaping number is the boost ceiling (**Highest pre-charge
+target**).
 
 `Eco when the room is empty` and away-presence eco still cap the result —
 unless you tick **Boost even when nobody is here**, which lets an ultra-low

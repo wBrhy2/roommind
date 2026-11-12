@@ -99,6 +99,12 @@ async def test_list_rooms_empty(ws_hass, store, connection):
             "coil_dry_drain_minutes": 0,
             "compressor_groups": [],
             "tou_rules": [],
+            "tou_shaping": {
+                "mid_setback_delta": 2.0,
+                "boost_delta": 2.0,
+                "peak_heat_floor": 18.0,
+                "peak_cool_ceiling": 28.0,
+            },
         },
     )
 
@@ -3959,3 +3965,17 @@ async def test_save_room_tou_fields(ws_hass, store, connection):
     assert room["tou_mode"] == "setback_boost"
     assert room["tou_max_boost"] == 23.0
     assert room["tou_boost_unoccupied"] is True
+
+    # boost_only is a full participation mode (schema + persistence).
+    from homeassistant.components.websocket_api.messages import BASE_COMMAND_MESSAGE_SCHEMA
+
+    msg2 = {
+        "id": 66,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_mode": "boost_only",
+    }
+    BASE_COMMAND_MESSAGE_SCHEMA.extend(ROOM_SAVE_SCHEMA)(msg2)
+    await _save_room(ws_hass, connection, msg2)
+    assert store.get_room("living_room_abc12345")["tou_mode"] == "boost_only"

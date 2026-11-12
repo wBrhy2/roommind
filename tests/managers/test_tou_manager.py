@@ -541,6 +541,25 @@ def test_boost_gates_on_presence_vacation_and_cap() -> None:
     assert vac(ts, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0  # no boost in vacation
 
 
+def test_boost_only_charges_without_relaxing() -> None:
+    """boost_only: ultra-low pre-charges; mid/peak leave the schedule untouched."""
+    mgr = TouManager(_make_hass({}))
+    b = time.time()
+    mgr._timeline = _timeline((TOU_TIER_ULTRA_LOW, 60), (TOU_TIER_PEAK, 60), (TOU_TIER_MID, 60))
+    adjust = mgr.make_adjuster(_room(tou_mode="boost_only"), {})
+    assert adjust is not None
+    # ultra-low: the same charge a setback_boost room gets
+    charged = adjust(b + 30 * 60, TargetTemps(heat=21.0, cool=24.0))
+    assert charged.heat == 23.0
+    assert charged.cool == 22.0
+    # peak: no heat floor, no cool ceiling — the schedule stands
+    peak = adjust(b + 90 * 60, TargetTemps(heat=21.0, cool=24.0))
+    assert peak.heat == 21.0
+    assert peak.cool == 24.0
+    # mid: no setback delta either
+    assert adjust(b + 150 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
+
+
 def test_override_never_shaved() -> None:
     mgr = TouManager(_make_hass({}))
     mgr._timeline = _timeline((TOU_TIER_PEAK, 120))

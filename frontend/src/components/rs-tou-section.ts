@@ -27,6 +27,7 @@ import type {
   TouOverrideUntil,
   TouRule,
   TouRuleDef,
+  TouShaping,
   TouTier,
 } from "../types";
 import { localize } from "../utils/localize";
@@ -81,6 +82,13 @@ export class RsTouSection extends LitElement {
   @property({ type: Array }) public overrides: TouOverrideRow[] = [];
   /** The shared rule library (settings.tou_rules). */
   @property({ type: Array }) public rules: TouRule[] = [];
+  /** Global shaping defaults (Settings -> Time-of-Use) shown in the mode notes. */
+  @property({ attribute: false }) public shaping: TouShaping = {
+    mid_setback_delta: 2,
+    boost_delta: 2,
+    peak_heat_floor: 18,
+    peak_cool_ceiling: 28,
+  };
   /** All rooms, for the "used in N rooms" hint. */
   @property({ attribute: false }) public allRooms: Record<string, RoomConfig> = {};
   @property({ type: String }) public areaId = "";
@@ -267,6 +275,7 @@ export class RsTouSection extends LitElement {
                 ${localize(`tou.room_mode.${this.touMode}`, l)}${this._boostSuffix(l)}
               </div>`
         }
+        ${this._renderShapingNotes(l)}
         ${this.overrides.length > 0 || this.scheduleEnabled ? this._renderSectionHeader(l, false) : nothing}
         ${
           this.scheduleEnabled
@@ -284,7 +293,7 @@ export class RsTouSection extends LitElement {
         <ha-select
           .label=${localize("tou.room_mode", l)}
           .value=${this.touMode}
-          .options=${(["off", "setback", "setback_boost"] as TouMode[]).map((m) => ({
+          .options=${(["off", "setback", "setback_boost", "boost_only"] as TouMode[]).map((m) => ({
             value: m,
             label: localize(`tou.room_mode.${m}`, l),
           }))}
@@ -298,8 +307,9 @@ export class RsTouSection extends LitElement {
         <rs-info-icon .text=${localize("tou.room_mode_hint", l)}></rs-info-icon>
       </div>
       <div class="hint">${localize("tou.room_mode_hint", l)}</div>
+      ${this._renderShapingNotes(l)}
       ${
-        this.touMode === "setback_boost"
+        this.touMode === "setback_boost" || this.touMode === "boost_only"
           ? html`
               <div class="sub-field">
                 <ha-textfield
@@ -808,8 +818,39 @@ export class RsTouSection extends LitElement {
   }
 
   private _boostSuffix(l: string): string {
-    if (this.touMode !== "setback_boost") return "";
+    if (this.touMode !== "setback_boost" && this.touMode !== "boost_only") return "";
     return ` · ${localize("tou.room_max_boost", l)}: <strong>${this._displayBoost()}${tempUnit(this.hass)}</strong>`;
+  }
+
+  /** The numbers the selected posture actually works with. The shaping
+   * depths themselves live in Settings -> Time-of-Use; the room only picks
+   * the posture, so the card shows what that posture will do. */
+  private _renderShapingNotes(l: string) {
+    const setbackOn = this.touMode === "setback" || this.touMode === "setback_boost";
+    const boostOn = this.touMode === "setback_boost" || this.touMode === "boost_only";
+    if (!setbackOn && !boostOn) return nothing;
+    return html`
+      ${
+        setbackOn
+          ? html`<div class="hint">
+              ${localize("tou.shaping_note_setback", l, {
+                mid: toDisplayDelta(this.shaping.mid_setback_delta, this.hass),
+                heat_floor: toDisplay(this.shaping.peak_heat_floor, this.hass),
+                cool_ceiling: toDisplay(this.shaping.peak_cool_ceiling, this.hass),
+              })}
+            </div>`
+          : nothing
+      }
+      ${
+        boostOn
+          ? html`<div class="hint">
+              ${localize("tou.shaping_note_boost", l, {
+                boost: toDisplayDelta(this.shaping.boost_delta, this.hass),
+              })}
+            </div>`
+          : nothing
+      }
+    `;
   }
 
   private _displayBoost(): number {

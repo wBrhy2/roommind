@@ -20,6 +20,10 @@ from .const import (
     DEFAULT_COMPRESSOR_MIN_RUN_MINUTES,
     DEFAULT_CONFLICT_RESOLUTION,
     DEFAULT_CONTROL_MODE,
+    DEFAULT_TOU_BOOST_DELTA,
+    DEFAULT_TOU_MID_SETBACK_DELTA,
+    DEFAULT_TOU_PEAK_COOL_CEILING,
+    DEFAULT_TOU_PEAK_HEAT_FLOOR,
     DOMAIN,
     MIN_OCCUPANCY_ECO_DELAY_MINUTES,
     OVERRIDE_CUSTOM,
@@ -588,6 +592,14 @@ async def websocket_list_rooms(
             "coil_dry_drain_minutes": settings.get("coil_dry_drain_minutes", DEFAULT_COIL_DRY_DRAIN_MINUTES),
             "compressor_groups": settings.get("compressor_groups", []),
             "tou_rules": settings.get("tou_rules", []),
+            # Shaping defaults the room cards surface in their mode notes, so
+            # a setback room can show the depth it will actually relax to.
+            "tou_shaping": {
+                "mid_setback_delta": settings.get("tou_mid_setback_delta", DEFAULT_TOU_MID_SETBACK_DELTA),
+                "boost_delta": settings.get("tou_boost_delta", DEFAULT_TOU_BOOST_DELTA),
+                "peak_heat_floor": settings.get("tou_peak_heat_floor", DEFAULT_TOU_PEAK_HEAT_FLOOR),
+                "peak_cool_ceiling": settings.get("tou_peak_cool_ceiling", DEFAULT_TOU_PEAK_COOL_CEILING),
+            },
         },
     )
 
