@@ -5,8 +5,8 @@ import type {
   HassArea,
   RoomConfig,
   RoomWithoutArea,
+  TouLimits,
   TouRule,
-  TouShaping,
 } from "./types";
 
 import { getEntitiesForArea } from "./utils/room-state";
@@ -67,12 +67,14 @@ export class RoomMindPanel extends LitElement {
   @state() private _presenceAwayAction: "eco" | "off" = "eco";
   /** Shared tariff rule library (settings.tou_rules) for the device cards. */
   @state() private _touRules: TouRule[] = [];
-  /** Global shaping defaults for the room cards' mode notes. */
-  @state() private _touShaping: TouShaping = {
-    mid_setback_delta: 2,
-    boost_delta: 2,
-    peak_heat_floor: 18,
-    peak_cool_ceiling: 28,
+  /** Global store limits for the room cards' store notes. */
+  @state() private _touLimits: TouLimits = {
+    heat_min: 17,
+    heat_max: 28,
+    cool_min: 18,
+    cool_max: 30,
+    swing: 3,
+    store_gap: 1,
   };
 
   @state() private _saveStatus: "idle" | "saving" | "saved" | "error" = "idle";
@@ -517,7 +519,7 @@ export class RoomMindPanel extends LitElement {
             .coilDryFanMode=${this._coilDryFanMode}
             .rooms=${this._rooms}
             .touRules=${this._touRules}
-            .touShaping=${this._touShaping}
+            .touLimits=${this._touLimits}
             @back-clicked=${this._onBackFromDetail}
             @room-updated=${this._onRoomUpdated}
           ></rs-room-detail>
@@ -827,7 +829,7 @@ export class RoomMindPanel extends LitElement {
         coil_dry_mode: string;
         coil_dry_fan_mode: string;
         tou_rules: TouRule[];
-        tou_shaping?: TouShaping;
+        tou_limits?: TouLimits;
       }>({
         type: "roommind/rooms/list",
       });
@@ -851,7 +853,7 @@ export class RoomMindPanel extends LitElement {
       this._presencePersons = result.presence_persons ?? [];
       this._presenceAwayAction = result.presence_away_action ?? "eco";
       this._touRules = result.tou_rules ?? [];
-      this._touShaping = result.tou_shaping ?? this._touShaping;
+      this._touLimits = result.tou_limits ?? this._touLimits;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.debug("[RoomMind] loadRooms:", err);

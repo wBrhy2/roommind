@@ -1,13 +1,15 @@
 /**
  * rs-tou-section – Per-room Time-of-Use participation and tariff schedule.
  *
- * "setback" only ever lowers demand during expensive tiers; "setback + boost"
- * additionally lets the room pre-charge during ultra-cheap windows (the MPC
- * decides the timing from the tariff timeline and the learned thermal model).
+ * The store toggle lets the room arbitrage tariff periods: targets relax
+ * across expensive stretches and pre-charge before them, bounded by the
+ * consent band, the max swing and the price gap that justifies moving at all
+ * (the MPC decides the timing from the tariff timeline and the learned model).
+ * Rooms without the toggle still steer via the schedule below.
  *
  * The Tariff schedule is the room's tariff proxy: rows are references into the
- * shared rule library (settings.tou_rules), each row (time of use) (action)
- * (heat) (cool) (end). The section toggle gates the whole schedule: when off,
+ * shared rule library (settings.tou_rules), each row (action) (anchor) (heat)
+ * (cool) (end). The section toggle gates the whole schedule: when off,
  * the contents are hidden and the rows cannot steer the room — but they stay
  * in place, so a temporary switch-off never loses rules (the library prunes
  * only on last reference). Editing a rule propagates to every room; renaming
@@ -21,13 +23,13 @@ import { customElement, property, state } from "lit/decorators.js";
 import type {
   HomeAssistant,
   RoomConfig,
-  TouMode,
+  TouLimits,
   TouOverrideAction,
   TouOverrideRow,
   TouOverrideUntil,
+  TouRoomLimits,
   TouRule,
   TouRuleDef,
-  TouShaping,
   TouTier,
 } from "../types";
 import { localize } from "../utils/localize";
@@ -96,23 +98,25 @@ function newId(): string {
 @customElement("rs-tou-section")
 export class RsTouSection extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
-  @property({ type: String }) public touMode: TouMode = "off";
-  /** °C cap for boosted targets; the backend default mirrors the global clamp max. */
-  @property({ type: Number }) public touMaxBoost = 28;
-  @property({ type: Boolean }) public touBoostUnoccupied = false;
+  /** The store toggle: this room arbitrages tariff periods (see tou_manager). */
+  @property({ type: Boolean }) public storeEnabled = false;
+  /** Global store limits (Settings -> Time-of-Use) shown under the toggle. */
+  @property({ attribute: false }) public limits: TouLimits = {
+    heat_min: 17,
+    heat_max: 28,
+    cool_min: 18,
+    cool_max: 30,
+    swing: 3,
+    store_gap: 1,
+  };
+  /** This room's overrides of the global limits (blank = inherit). */
+  @property({ attribute: false }) public roomLimits: TouRoomLimits = {};
   /** The tariff-schedule section gate (room config). */
   @property({ type: Boolean }) public scheduleEnabled = false;
   /** This room's schedule rows: references into the shared library. */
   @property({ type: Array }) public overrides: TouOverrideRow[] = [];
   /** The shared rule library (settings.tou_rules). */
   @property({ type: Array }) public rules: TouRule[] = [];
-  /** Global shaping defaults (Settings -> Time-of-Use) shown in the mode notes. */
-  @property({ attribute: false }) public shaping: TouShaping = {
-    mid_setback_delta: 2,
-    boost_delta: 2,
-    peak_heat_floor: 18,
-    peak_cool_ceiling: 28,
-  };
   /** All rooms, for the "used in N rooms" hint. */
   @property({ attribute: false }) public allRooms: Record<string, RoomConfig> = {};
   @property({ type: String }) public areaId = "";
@@ -388,13 +392,13 @@ export class RsTouSection extends LitElement {
     if (!this.editing) {
       return html`
         ${
-          this.touMode === "off"
+          !this.storeEnabled && !this.scheduleEnabled
             ? html`<div class="summary disabled">${localize("tou.room_off_summary", l)}</div>`
             : html`<div class="summary">
-                ${localize(`tou.room_mode.${this.touMode}`, l)}${this._boostSuffix(l)}
+                ${this.storeEnabled ? localize("tou.store_on_summary", l) : localize("tou.schedule_only_summary", l)}
+                ${this.storeEnabled ? html`<div class="hint">${this._limitsNote(l)}</div>` : nothing}
               </div>`
         }
-        ${this._renderShapingNotes(l)}
         ${this.overrides.length > 0 || this.scheduleEnabled ? this._renderSectionHeader(l, false) : nothing}
         ${
           this.scheduleEnabled
@@ -413,55 +417,16 @@ export class RsTouSection extends LitElement {
       `;
     }
     return html`
-      <div class="mode-row">
-        <ha-select
-          .label=${localize("tou.room_mode", l)}
-          .value=${this.touMode}
-          .options=${(["off", "setback", "setback_boost", "boost_only"] as TouMode[]).map((m) => ({
-            value: m,
-            label: localize(`tou.room_mode.${m}`, l),
-          }))}
-          @selected=${(e: Event) => {
-            const v = getSelectValue(e);
-            if (v) this._emit("tou_mode", v);
-          }}
-          @closed=${(e: Event) => e.stopPropagation()}
-          fixedMenuPosition
-        ></ha-select>
-        <rs-info-icon .text=${localize("tou.room_mode_hint", l)}></rs-info-icon>
-      </div>
-      <div class="hint">${localize("tou.room_mode_hint", l)}</div>
-      ${this._renderShapingNotes(l)}
+      <rs-toggle-row
+        .label=${localize("tou.store_enabled_label", l)}
+        .checked=${this.storeEnabled}
+        @toggle-changed=${(e: CustomEvent) => this._emit("tou_store_enabled", e.detail as boolean)}
+      ></rs-toggle-row>
+      <div class="hint">${localize("tou.store_hint", l)}</div>
       ${
-        this.touMode === "setback_boost" || this.touMode === "boost_only"
-          ? html`
-              <div class="sub-field">
-                <ha-textfield
-                  type="number"
-                  .value=${String(this._displayBoost())}
-                  .label=${localize("tou.room_max_boost", l)}
-                  .suffix=${tempUnit(this.hass)}
-                  min=${tempRange(10, 40, this.hass).min}
-                  max=${tempRange(10, 40, this.hass).max}
-                  step=${tempStep(this.hass)}
-                  @change=${(e: Event) => {
-                    const v = parseFloat((e.target as HTMLInputElement).value);
-                    if (!isNaN(v)) this._emit("tou_max_boost", toCelsius(v, this.hass));
-                  }}
-                ></ha-textfield>
-                <div class="hint">${localize("tou.room_max_boost_hint", l)}</div>
-              </div>
-              <label class="mode-row">
-                <input
-                  type="checkbox"
-                  .checked=${this.touBoostUnoccupied}
-                  @change=${(e: Event) =>
-                    this._emit("tou_boost_unoccupied", (e.target as HTMLInputElement).checked)}
-                />
-                <span>${localize("tou.room_boost_unoccupied", l)}</span>
-              </label>
-              <div class="hint">${localize("tou.room_boost_unoccupied_hint", l)}</div>
-            `
+        this.storeEnabled
+          ? html`<div class="hint">${this._limitsNote(l)}</div>
+              ${this._renderLimitOverrides(l)}`
           : nothing
       }
       ${this._renderSectionHeader(l, true)}
@@ -1376,46 +1341,67 @@ export class RsTouSection extends LitElement {
     return `${parts.join(" · ")} · ${sides.join(" / ")} · ${end}`;
   }
 
-  private _boostSuffix(l: string): string {
-    if (this.touMode !== "setback_boost" && this.touMode !== "boost_only") return "";
-    return ` · ${localize("tou.room_max_boost", l)}: <strong>${this._displayBoost()}${tempUnit(this.hass)}</strong>`;
+  // ---- Store limits ----
+
+  /** The limit actually in force: the room's override or the global value. */
+  private _eff(key: keyof TouLimits): number {
+    const v = this.roomLimits[key];
+    return v == null ? this.limits[key] : v;
   }
 
-  /** The numbers the selected posture actually works with. The shaping
-   * depths themselves live in Settings -> Time-of-Use; the room only picks
-   * the posture, so the card shows what that posture will do. */
-  private _renderShapingNotes(l: string) {
-    const setbackOn = this.touMode === "setback" || this.touMode === "setback_boost";
-    const boostOn = this.touMode === "setback_boost" || this.touMode === "boost_only";
-    if (!setbackOn && !boostOn) return nothing;
-    return html`
-      ${
-        setbackOn
-          ? html`<div class="hint">
-              ${localize("tou.shaping_note_setback", l, {
-                mid: toDisplayDelta(this.shaping.mid_setback_delta, this.hass),
-                heat_floor: toDisplay(this.shaping.peak_heat_floor, this.hass),
-                cool_ceiling: toDisplay(this.shaping.peak_cool_ceiling, this.hass),
-              })}
-            </div>`
-          : nothing
-      }
-      ${
-        boostOn
-          ? html`<div class="hint">
-              ${localize("tou.shaping_note_boost", l, {
-                boost: toDisplayDelta(this.shaping.boost_delta, this.hass),
-              })}
-            </div>`
-          : nothing
-      }
+  /** One sentence naming the band, the swing and the price gate the store
+   * works inside — so the toggle is never a magic box. */
+  private _limitsNote(l: string) {
+    return localize("tou.limits_note", l, {
+      swing: String(toDisplayDelta(this._eff("swing"), this.hass)),
+      hmin: String(toDisplay(this._eff("heat_min"), this.hass)),
+      hmax: String(toDisplay(this._eff("heat_max"), this.hass)),
+      cmin: String(toDisplay(this._eff("cool_min"), this.hass)),
+      cmax: String(toDisplay(this._eff("cool_max"), this.hass)),
+      gap: String(this._eff("store_gap")),
+    });
+  }
+
+  private _renderLimitOverrides(l: string) {
+    const show = (key: keyof TouLimits) => {
+      const v = this.roomLimits[key];
+      if (v == null) return "";
+      if (key === "store_gap") return String(v);
+      if (key === "swing") return String(toDisplayDelta(v, this.hass));
+      return String(toDisplay(v, this.hass));
+    };
+    const commit = (key: keyof TouLimits, raw: string) => {
+      const trimmed = raw.trim();
+      if (trimmed === "") return this._emit(`tou_${key}`, null);
+      const v = parseFloat(trimmed);
+      if (isNaN(v)) return;
+      const value =
+        key === "store_gap"
+          ? v
+          : key === "swing"
+            ? toCelsiusDelta(v, this.hass)
+            : toCelsius(v, this.hass);
+      this._emit(`tou_${key}`, value);
+    };
+    const field = (key: keyof TouLimits, unit: string) => html`
+      <ha-textfield
+        type="number"
+        .value=${show(key)}
+        .label=${localize(`tou.limit_${key}`, l)}
+        .suffix=${unit}
+        step=${key === "store_gap" ? "0.1" : tempStep(this.hass)}
+        @change=${(e: Event) => commit(key, (e.target as HTMLInputElement).value)}
+      ></ha-textfield>
     `;
-  }
-
-  private _displayBoost(): number {
-    // null (never set) means "no stricter cap than the global band"; the
-    // stored default mirrors the backend clamp max so the field is honest.
-    return toDisplay(this.touMaxBoost, this.hass);
+    const unit = tempUnit(this.hass);
+    return html`
+      <label class="form-label">${localize("tou.room_limits_title", l)}</label>
+      <div class="anchor-grid">
+        ${field("heat_min", unit)} ${field("heat_max", unit)} ${field("cool_min", unit)}
+        ${field("cool_max", unit)} ${field("swing", unit)} ${field("store_gap", "×")}
+      </div>
+      <div class="hint">${localize("tou.room_limits_hint", l)}</div>
+    `;
   }
 
   private _emit(key: string, value: unknown) {

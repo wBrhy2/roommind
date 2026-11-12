@@ -1,6 +1,6 @@
 /**
- * rs-settings-tou – Time-of-Use tariff awareness: source bindings and tier
- * shaping defaults. Tariff *scheduling* lives on the device card
+ * rs-settings-tou – Time-of-Use tariff awareness: source bindings and store
+ * limits. Tariff *scheduling* lives on the device card
  * (rs-tou-section): the rooms' `tou_overrides` rows anchor actions to the
  * tiers defined here.
  *
@@ -15,7 +15,8 @@
  *   tier (``tou_lookahead``).
  *
  * Bound-but-unselected sources stay in settings (ignored by the manager).
- * Shaping defaults live behind the "fine-tune" disclosure.
+ * The store-layer limits (consent band, swing, price gap) live behind the
+ * "fine-tune" disclosure.
  *
  * Temperatures edit in HA display units and persist as °C, like the room
  * comfort/eco fields (see utils/temperature.ts).
@@ -75,12 +76,12 @@ export class RsSettingsTou extends LitElement {
   @property({ attribute: false }) public touFlagEntities: Record<string, string> = {};
   @property({ type: Boolean }) public touPriceWeighting = true;
   @property({ attribute: false }) public touThresholds: Record<string, string> = {};
-  @property({ type: Number }) public touPeakHeatFloor = 18;
-  @property({ type: Number }) public touPeakCoolCeiling = 28;
-  @property({ type: Number }) public touMidSetbackDelta = 2;
-  @property({ type: Number }) public touBoostDelta = 2;
-  @property({ type: Number }) public touClampMin = 17;
-  @property({ type: Number }) public touClampMax = 28;
+  @property({ type: Number }) public touHeatMin = 17;
+  @property({ type: Number }) public touHeatMax = 28;
+  @property({ type: Number }) public touCoolMin = 18;
+  @property({ type: Number }) public touCoolMax = 30;
+  @property({ type: Number }) public touSwing = 3;
+  @property({ type: Number }) public touStoreGap = 1;
 
   @state() private _fineTuneOpen = false;
 
@@ -506,19 +507,13 @@ export class RsSettingsTou extends LitElement {
                       <div class="tier-grid shaping-grid">
                         <div class="col-header">${localize("tou.col_heating", l)}</div>
                         <div class="col-header">${localize("tou.col_cooling", l)}</div>
-                        ${this._tempField("touPeakHeatFloor", localize("tou.peak_heat_floor", l), this.touPeakHeatFloor, 5, 35)}
-                        ${this._tempField(
-                          "touPeakCoolCeiling",
-                          localize("tou.peak_cool_ceiling", l),
-                          this.touPeakCoolCeiling,
-                          5,
-                          40,
-                        )}
+                        ${this._tempField("touHeatMin", localize("tou.clamp_min", l), this.touHeatMin, 5, 35)}
+                        ${this._tempField("touCoolMin", localize("tou.clamp_min", l), this.touCoolMin, 5, 35)}
+                        ${this._tempField("touHeatMax", localize("tou.clamp_max", l), this.touHeatMax, 10, 40)}
+                        ${this._tempField("touCoolMax", localize("tou.clamp_max", l), this.touCoolMax, 10, 40)}
                         <div class="col-span">${localize("tou.both_steps", l)}</div>
-                        ${this._deltaField("touMidSetbackDelta", localize("tou.mid_delta", l), this.touMidSetbackDelta, 0, 5)}
-                        ${this._deltaField("touBoostDelta", localize("tou.boost_delta", l), this.touBoostDelta, 0, 5)}
-                        ${this._tempField("touClampMin", localize("tou.clamp_min", l), this.touClampMin, 5, 30)}
-                        ${this._tempField("touClampMax", localize("tou.clamp_max", l), this.touClampMax, 10, 40)}
+                        ${this._deltaField("touSwing", localize("tou.swing", l), this.touSwing, 0, 10)}
+                        ${this._gapField()}
                       </div>
                       <rs-toggle-row
                         .label=${localize("tou.price_weighting", l)}
@@ -646,6 +641,24 @@ export class RsSettingsTou extends LitElement {
       @change=${(e: Event) => {
         const v = parseFloat((e.target as HTMLInputElement).value);
         if (!isNaN(v)) this._fire(key, toCelsiusDelta(v, this.hass));
+      }}
+    ></ha-textfield>`;
+  }
+
+  /** Price ratio, not a temperature: no unit conversion, just a number. */
+  private _gapField() {
+    const l = this.hass.language;
+    return html`<ha-textfield
+      type="number"
+      .value=${String(this.touStoreGap)}
+      .label=${localize("tou.store_gap", l)}
+      .suffix=${"×"}
+      min="1"
+      max="10"
+      step="0.1"
+      @change=${(e: Event) => {
+        const v = parseFloat((e.target as HTMLInputElement).value);
+        if (!isNaN(v)) this._fire("touStoreGap", Math.max(1, v));
       }}
     ></ha-textfield>`;
   }

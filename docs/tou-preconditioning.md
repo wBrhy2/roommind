@@ -95,14 +95,15 @@ inverter/meter can publish the surplus state instead of a tariff:
 - Write an ultra-low price (or select the ultra-low period) into the cost or
   period helper whenever production exceeds consumption, and the normal
   tariff state back when it does not. Bind that helper as your tariff source.
-- Rooms on `setback + boost` respond as they would to an ultra-cheap window:
-  the MPC raises heating targets up to each room's **Highest pre-charge
-  target** and runs the heat pump early, so the building's mass — walls,
+- Rooms with the **store toggle** respond as they would to an ultra-cheap
+  window before a peak: the MPC raises heating targets within the room's
+  swing and band and runs the heat pump early, so the building's mass — walls,
   screed, furniture — soaks the surplus up as heat. Cooling works mirrored:
   a surplus window may pre-chill instead, storing coolth for the afternoon.
-- Tick **Boost even when nobody is here** on rooms you want charging while
-  empty — the whole point is that the sun shines whether or not you are in
-  the room.
+  Surplus with no expensive window ahead still pays off when you want it;
+  a tariff rule (`Ultra-low · starts`, `Increase target by …`, holding until
+  the next period change) captures "warm while it's free" as an explicit
+  promise instead of an economic decision.
 - When the surplus ends (clouds, battery full, feed-in capped), the tier
   falls back and the stored heat carries the house into the evening; a card
   schedule row holding to the **next period change** or to a wall-clock time
@@ -115,48 +116,51 @@ inverter/meter can publish the surplus state instead of a tariff:
   The two can coexist: calendars or windows give the future, the period/cost
   helper corrects the present.
 
-Treat it as comfort-buffered storage: the clamps (`Lowest/Highest allowed
-target`) and per-room boost caps are what stop a bright March noon from
+Treat it as comfort-buffered storage: the room's band (`Heating never
+above`, `Cooling never below`) and the swing are what stop a bright March noon from
 turning the living room into a greenhouse — set them where you would still
 want to sit at 17:00.
 
 ## Room participation
 
-Each room (except outdoor rooms) has a **Time-of-Use mode**:
+Each room (except outdoor rooms) has two independent switches, both on the
+device card:
 
-- `Off` — ignore tariffs (default; upgrades are unaffected).
-- `Pre-cool` (`setback`) — the target eases during mid-peak and peak tiers,
-  never above the schedule.
-- `Pre-cool + pre-heat` (`setback_boost`) — additionally pre-charges during
-  ultra-low tiers: heat rises up to **Highest pre-heat target**, cooling
-  dips, so the following peak runs on stored comfort.
-- `Pre-heat only` (`boost_only`) — the reverse posture: ultra-low tiers
-  pre-heat exactly as `Pre-cool + pre-heat` does, but mid/peak tiers leave
-  the schedule untouched — the room charges cheap and never relaxes on its
-  own.
+- **Store energy between tariff periods** (`tou_store_enabled`) — the economic
+  layer. RoomMind relaxes targets across future expensive stretches and
+  pre-charges before them (against the learned decay model), so the room
+  coasts through the expensive window on stored heat and lands back on
+  comfort when the stretch ends. Presence does not gate the store — the
+  pre-charge often runs while the house is empty, which is exactly when
+  energy is cheap.
+- **Enable tariff schedule for this room** (`tou_schedule_enabled`) — the
+  rules layer (below). A room without the store can still steer purely by
+  rules.
 
-The names in brackets are the stored mode ids; only the labels were renamed.
+A room with neither switch ignores tariffs entirely.
 
-How far a participating room actually shifts is not per-room: the shaping
-defaults come from `Settings -> Time-of-Use` (fine-tune), and the card shows
-the current numbers under the mode selector so you can see what the posture
-will do. The only per-room shaping number is the pre-heat ceiling
-(**Highest pre-heat target**).
+How far the store may shift a target is set by three limits (global in
+`Settings -> Time-of-Use`, each optionally narrowed per room on the card):
 
-`Eco when the room is empty` and away-presence eco still cap the result —
-unless you tick **Boost even when nobody is here**, which lets an ultra-low
-pre-charge warm an empty room (your loft scenario: charge at 02:00 so the
-07:00 peak drifts down through comfort while you are still there).
+- **Band** (`tou_heat_min/max`, `tou_cool_min/max`) — the hard consent: no
+  target, from any mechanism, ever leaves it.
+- **Swing** (`tou_swing`) — how far the store layer may deviate from the
+  schedule at all (relax below by at most this, store above by at most this).
+  Relaxation never undercuts the room's eco target.
+- **Price gap** (`tou_store_gap`) — the minimum ratio expensive-window ÷
+  cheapest-alternative that justifies moving; below it the schedule stands
+  untouched.
 
-Tier shaping defaults (peak heating/cooling limits, mid setback, boost step,
-clamp band) live in the settings and match the familiar Ontario numbers
-directly: peak 18 °C heating floor / 28 °C cooling ceiling, mid ±2 °C. These
-are bounds on the room's **indoor target temperature** — during a peak the
-heating setpoint never rises above 18 °C and the cooling setpoint never drops
-below 28 °C. They are not device-output limits, and they are separate from
-the global *Maximum outdoor temp for heating* / *Minimum outdoor temp for
-cooling* gates under Control, which block conditioning by outdoor weather
-regardless of tier.
+The defaults reproduce the familiar Ontario numbers: comfort 21, swing 3, band
+17–28 relaxes a peak toward 18 °C and stores up to 24 °C before it. These are
+bounds on the room's **indoor target temperature**, not device-output limits,
+and they are separate from the global *Maximum outdoor temp for heating* /
+*Minimum outdoor temp for cooling* gates under Control, which block
+conditioning by outdoor weather regardless of tier.
+
+Vacation and manual overrides keep priority: a pre-charge is skipped during
+vacation, and a boost you started is never shaved by a tariff. While mold
+prevention is active the heating side is not relaxed.
 
 ## Price-weighted planning
 
@@ -164,7 +168,8 @@ With a tariff timeline, the MPC weights its energy term by the tier price of
 every future block. In practice: a run that would burn energy inside the peak
 costs more, so the optimizer starts it during the cheap window before the
 boundary and lets the learned room model coast through the start of the peak.
-Turn it off if you only want the plain tier setback/boost.
+Turn it off and the optimizer sees a flat energy price: rules and the store
+layer still move targets, but nothing is timed against the tariff.
 
 ## Tariff schedule (device card)
 
@@ -322,10 +327,12 @@ tier timeline; the panel shows the active tier.
    `ULTOU-UL`) and bind them as tariff calendars with the matching tier.
    (The calendars are the schedule of record; RoomMind reads the events —
    no `Power-*` automations or `input_boolean` flags needed.)
-3. Settings: peak floor 18 °C, peak ceiling 28 °C, mid ±2 °C, boost +2 °C,
-   clamp 17–28 °C, price weighting on.
-4. Rooms: `Setback + boost` for the loft/boys/dining rooms that should
-   pre-charge overnight; `Setback only` where comfort during peaks matters.
+3. Settings → Time-of-Use: leave the store defaults (band 17–28 °C heating /
+   18–30 °C cooling, swing 3 °C, gap ×1) and keep price weighting on.
+4. Rooms: turn on **Store energy between tariff periods** for the
+   loft/boys/dining rooms that should pre-charge overnight and coast through
+   peaks; rooms where peak comfort is non-negotiable simply leave it off and
+   get their shaping from rules alone.
 5. Card schedule row "Evening peak push-out": (Peak · starts) (Override target
    temperature to) heating 18 °C (cooling blank), holds until the next period
    change.

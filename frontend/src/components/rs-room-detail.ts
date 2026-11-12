@@ -11,10 +11,9 @@ import type {
   DeviceConfig,
   DeviceType,
   DeviceRole,
-  TouMode,
+  TouLimits,
   TouOverrideRow,
   TouRule,
-  TouShaping,
 } from "../types";
 import "./rs-hero-status";
 import "./rs-climate-mode-selector";
@@ -105,21 +104,38 @@ export class RsRoomDetail extends LitElement {
   @state() private _heatSourcePrimaryDelta = 1.5;
   @state() private _heatSourceOutdoorThreshold = 5.0;
   @state() private _heatSourceAcMinOutdoor = -15.0;
-  @state() private _touMode: TouMode = "off";
-  @state() private _touMaxBoost = 28;
-  @state() private _touBoostUnoccupied = false;
+  @state() private _touStoreEnabled = false;
+  @state() private _touHeatMin: number | null = null;
+  @state() private _touHeatMax: number | null = null;
+  @state() private _touCoolMin: number | null = null;
+  @state() private _touCoolMax: number | null = null;
+  @state() private _touSwing: number | null = null;
+  @state() private _touStoreGap: number | null = null;
   @state() private _touScheduleEnabled = false;
   @state() private _touOverrides: TouOverrideRow[] = [];
 
   /** All rooms + the shared rule library, for the tariff schedule editor. */
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
   @property({ attribute: false }) public touRules: TouRule[] = [];
-  @property({ attribute: false }) public touShaping: TouShaping = {
-    mid_setback_delta: 2,
-    boost_delta: 2,
-    peak_heat_floor: 18,
-    peak_cool_ceiling: 28,
+  @property({ attribute: false }) public touLimits: TouLimits = {
+    heat_min: 17,
+    heat_max: 28,
+    cool_min: 18,
+    cool_max: 30,
+    swing: 3,
+    store_gap: 1,
   };
+
+  private get _touRoomLimits() {
+    return {
+      heat_min: this._touHeatMin,
+      heat_max: this._touHeatMax,
+      cool_min: this._touCoolMin,
+      cool_max: this._touCoolMax,
+      swing: this._touSwing,
+      store_gap: this._touStoreGap,
+    };
+  }
   @state() private _optimisticCoverResume = false;
 
   private _prevAreaId: string | null = null;
@@ -327,9 +343,13 @@ export class RsRoomDetail extends LitElement {
       this._heatSourcePrimaryDelta = this.config.heat_source_primary_delta ?? 1.5;
       this._heatSourceOutdoorThreshold = this.config.heat_source_outdoor_threshold ?? 5.0;
       this._heatSourceAcMinOutdoor = this.config.heat_source_ac_min_outdoor ?? -15.0;
-      this._touMode = this.config.tou_mode ?? "off";
-      this._touMaxBoost = this.config.tou_max_boost ?? 28;
-      this._touBoostUnoccupied = this.config.tou_boost_unoccupied ?? false;
+      this._touStoreEnabled = this.config.tou_store_enabled ?? false;
+      this._touHeatMin = this.config.tou_heat_min ?? null;
+      this._touHeatMax = this.config.tou_heat_max ?? null;
+      this._touCoolMin = this.config.tou_cool_min ?? null;
+      this._touCoolMax = this.config.tou_cool_max ?? null;
+      this._touSwing = this.config.tou_swing ?? null;
+      this._touStoreGap = this.config.tou_store_gap ?? null;
       this._touScheduleEnabled = this.config.tou_schedule_enabled ?? false;
       this._touOverrides = this.config.tou_overrides ?? [];
     } else {
@@ -376,9 +396,13 @@ export class RsRoomDetail extends LitElement {
       this._heatSourcePrimaryDelta = 1.5;
       this._heatSourceOutdoorThreshold = 5.0;
       this._heatSourceAcMinOutdoor = -15.0;
-      this._touMode = "off";
-      this._touMaxBoost = 28;
-      this._touBoostUnoccupied = false;
+      this._touStoreEnabled = false;
+      this._touHeatMin = null;
+      this._touHeatMax = null;
+      this._touCoolMin = null;
+      this._touCoolMax = null;
+      this._touSwing = null;
+      this._touStoreGap = null;
       this._touScheduleEnabled = false;
       this._touOverrides = [];
     }
@@ -687,13 +711,12 @@ export class RsRoomDetail extends LitElement {
                   <rs-tou-section
                     .hass=${this.hass}
                     .editing=${false}
-                    .touMode=${this._touMode}
-                    .touMaxBoost=${this._touMaxBoost}
-                    .touBoostUnoccupied=${this._touBoostUnoccupied}
+                    .storeEnabled=${this._touStoreEnabled}
                     .scheduleEnabled=${this._touScheduleEnabled}
                     .overrides=${this._touOverrides}
                     .rules=${this.touRules}
-                    .shaping=${this.touShaping}
+                    .limits=${this.touLimits}
+                    .roomLimits=${this._touRoomLimits}
                     .allRooms=${this.rooms}
                     .areaId=${this.area.area_id}
                     @setting-changed=${this._onTouSettingChanged}
@@ -994,13 +1017,12 @@ export class RsRoomDetail extends LitElement {
           <rs-tou-section
             .hass=${this.hass}
             .editing=${true}
-            .touMode=${this._touMode}
-            .touMaxBoost=${this._touMaxBoost}
-            .touBoostUnoccupied=${this._touBoostUnoccupied}
+            .storeEnabled=${this._touStoreEnabled}
             .scheduleEnabled=${this._touScheduleEnabled}
             .overrides=${this._touOverrides}
             .rules=${this.touRules}
-            .shaping=${this.touShaping}
+            .limits=${this.touLimits}
+            .roomLimits=${this._touRoomLimits}
             .allRooms=${this.rooms}
             .areaId=${this.area.area_id}
             @setting-changed=${this._onTouSettingChanged}
@@ -1221,9 +1243,13 @@ export class RsRoomDetail extends LitElement {
   private _onTouSettingChanged(e: CustomEvent<{ key: string; value: unknown }>) {
     const { key, value } = e.detail;
     e.stopPropagation();
-    if (key === "tou_mode") this._touMode = value as TouMode;
-    else if (key === "tou_max_boost") this._touMaxBoost = value as number;
-    else if (key === "tou_boost_unoccupied") this._touBoostUnoccupied = value as boolean;
+    if (key === "tou_store_enabled") this._touStoreEnabled = value as boolean;
+    else if (key === "tou_heat_min") this._touHeatMin = value as number | null;
+    else if (key === "tou_heat_max") this._touHeatMax = value as number | null;
+    else if (key === "tou_cool_min") this._touCoolMin = value as number | null;
+    else if (key === "tou_cool_max") this._touCoolMax = value as number | null;
+    else if (key === "tou_swing") this._touSwing = value as number | null;
+    else if (key === "tou_store_gap") this._touStoreGap = value as number | null;
     else if (key === "tou_schedule_enabled") this._touScheduleEnabled = value as boolean;
     else if (key === "tou_overrides") this._touOverrides = value as TouOverrideRow[];
     this._autoSave();
@@ -1305,9 +1331,13 @@ export class RsRoomDetail extends LitElement {
         heat_source_primary_delta: this._heatSourcePrimaryDelta,
         heat_source_outdoor_threshold: this._heatSourceOutdoorThreshold,
         heat_source_ac_min_outdoor: this._heatSourceAcMinOutdoor,
-        tou_mode: this._touMode,
-        tou_max_boost: this._touMaxBoost,
-        tou_boost_unoccupied: this._touBoostUnoccupied,
+        tou_store_enabled: this._touStoreEnabled,
+        tou_heat_min: this._touHeatMin,
+        tou_heat_max: this._touHeatMax,
+        tou_cool_min: this._touCoolMin,
+        tou_cool_max: this._touCoolMax,
+        tou_swing: this._touSwing,
+        tou_store_gap: this._touStoreGap,
         tou_schedule_enabled: this._touScheduleEnabled,
         tou_overrides: this._touOverrides,
       });

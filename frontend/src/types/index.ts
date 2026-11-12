@@ -103,18 +103,21 @@ export type ConflictResolution =
 /** Normalized tariff tier used by the Time-of-Use module. */
 export type TouTier = "peak" | "mid" | "off" | "ultra_low";
 
-/** Per-room participation in tariff-aware control. */
-export type TouMode = "off" | "setback" | "setback_boost" | "boost_only";
-
-/** Global shaping defaults (Settings -> Time-of-Use), shipped to the room
- * cards so a setback note can show the depth the room will actually relax
- * to. °C internally like every other temperature in the store. */
-export interface TouShaping {
-  mid_setback_delta: number;
-  boost_delta: number;
-  peak_heat_floor: number;
-  peak_cool_ceiling: number;
+/** Global store-layer limits (Settings -> Time-of-Use), shipped to the room
+ * cards so the store toggle can show the band and swing the room's economy
+ * will actually work in. °C internally like every other temperature in the
+ * store. */
+export interface TouLimits {
+  heat_min: number;
+  heat_max: number;
+  cool_min: number;
+  cool_max: number;
+  swing: number;
+  store_gap: number;
 }
+
+/** Per-room overrides of the global limits; null/undefined = inherit. */
+export type TouRoomLimits = Partial<Record<keyof TouLimits, number | null>>;
 
 /** Which source class answers the current tier ("auto" = legacy cascade). */
 export type TouTierSource = "auto" | "period" | "rate" | "flags";
@@ -263,10 +266,17 @@ export interface RoomConfig {
   heat_source_outdoor_threshold?: number;
   heat_source_ac_min_outdoor?: number;
   climate_control_enabled?: boolean;
-  /** Per-room Time-of-Use participation (see managers/tou_manager.py). */
-  tou_mode?: TouMode;
-  tou_max_boost?: number | null;
-  tou_boost_unoccupied?: boolean;
+  /** The store layer arbitrages tariff periods for this room (see
+   * managers/tou_manager.py): relax across expensive stretches, pre-charge
+   * before them, bounded by the limits below. */
+  tou_store_enabled?: boolean;
+  /** Optional per-room overrides of the global store limits (blank = inherit). */
+  tou_heat_min?: number | null;
+  tou_heat_max?: number | null;
+  tou_cool_min?: number | null;
+  tou_cool_max?: number | null;
+  tou_swing?: number | null;
+  tou_store_gap?: number | null;
   /** Section gate: off hides the schedule and the rows cannot steer the room. */
   tou_schedule_enabled?: boolean;
   /** Tariff-schedule rows: references into the shared rule library. */
@@ -331,12 +341,12 @@ export interface GlobalSettings {
   tou_peak_threshold?: number | null;
   tou_mid_threshold?: number | null;
   tou_ultra_threshold?: number | null;
-  tou_peak_heat_floor?: number;
-  tou_peak_cool_ceiling?: number;
-  tou_mid_setback_delta?: number;
-  tou_boost_delta?: number;
-  tou_clamp_min?: number;
-  tou_clamp_max?: number;
+  tou_heat_min?: number;
+  tou_heat_max?: number;
+  tou_cool_min?: number;
+  tou_cool_max?: number;
+  tou_swing?: number;
+  tou_store_gap?: number;
   tou_coast_max_minutes?: number;
   /** Shared tariff rule library; cards reference entries by rule_id. */
   tou_rules?: TouRule[];

@@ -60,7 +60,6 @@ def _room(**overrides) -> dict:
         "comfort_cool": 24.0,
         "eco_heat": 17.0,
         "eco_cool": 27.0,
-        "tou_mode": "setback",
     }
     room.update(overrides)
     return room
@@ -470,114 +469,148 @@ async def test_calendar_service_failure_is_graceful() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_peak_setback_lowers_heat_raises_cool() -> None:
+def test_store_relaxes_expensive_run() -> None:
     mgr = TouManager(_make_hass({}))
     mgr._timeline = _timeline((TOU_TIER_OFF, 0), (TOU_TIER_PEAK, 120))
-    adjust = mgr.make_adjuster(_room(), {"tou_enabled": True})
+    adjust = mgr.make_adjuster(_room(tou_store_enabled=True), {"tou_enabled": True})
     assert adjust is not None
     ts = time.time() + 60.0
     result = adjust(ts, TargetTemps(heat=21.0, cool=24.0))
-    assert result.heat == 18.0  # DEFAULT_TOU_PEAK_HEAT_FLOOR
-    assert result.cool == 28.0  # DEFAULT_TOU_PEAK_COOL_CEILING
+    assert result.heat == 18.0  # swung down from 21, floor above band & eco
+    assert result.cool == 27.0  # drifts up toward the eco cooling target
 
 
-def test_peak_never_raises_a_colder_schedule() -> None:
+def test_store_never_raises_a_colder_schedule() -> None:
     mgr = TouManager(_make_hass({}))
-    mgr._timeline = _timeline((TOU_TIER_PEAK, 120))
-    adjust = mgr.make_adjuster(_room(), {})
+    mgr._timeline = _timeline((TOU_TIER_OFF, 0), (TOU_TIER_PEAK, 120))
+    adjust = mgr.make_adjuster(_room(tou_store_enabled=True), {})
     assert adjust is not None
     result = adjust(time.time() + 60.0, TargetTemps(heat=16.0, cool=20.0))
-    assert result.heat == 16.0  # min(16, 18) — setback never *raises* heat
-    assert result.cool == 28.0  # but raising the cool target is demand reduction
+    assert result.heat == 16.0  # relaxation only lowers, never raises heat
+    assert result.cool == 23.0  # cooling relaxes upward by the swing
 
 
-def test_mid_delta_shift() -> None:
+def test_store_run_merges_contiguous_expensive_tiers() -> None:
+    """Mid + peak in a row are one coast: relaxation starts at the mid tier."""
     mgr = TouManager(_make_hass({}))
-    mgr._timeline = _timeline((TOU_TIER_MID, 120))
-    adjust = mgr.make_adjuster(_room(), {})
+    mgr._timeline = _timeline((TOU_TIER_OFF, 0), (TOU_TIER_MID, 60), (TOU_TIER_PEAK, 60))
+    adjust = mgr.make_adjuster(_room(tou_store_enabled=True), {})
     assert adjust is not None
-    result = adjust(time.time() + 60.0, TargetTemps(heat=21.0, cool=24.0))
-    assert result.heat == 19.0
-    assert result.cool == 26.0
+    result = adjust(time.time() + 30 * 60, TargetTemps(heat=21.0, cool=24.0))
+    assert result.heat == 18.0
+    assert result.cool == 27.0
 
 
-def test_boost_only_for_boost_rooms_and_off_never_touched() -> None:
+def test_store_is_quiet_without_a_run() -> None:
+    """Cheap tier, nothing expensive ahead: no relaxation, no pre-charge —
+    even with a learned decay model that could coast somewhere."""
     mgr = TouManager(_make_hass({}))
     mgr._timeline = _timeline((TOU_TIER_ULTRA_LOW, 120))
-    setback = mgr.make_adjuster(_room(tou_mode="setback"), {})
-    assert setback is not None
-    base = setback(time.time() + 60.0, TargetTemps(heat=21.0, cool=24.0))
-    assert base.heat == 21.0  # setback rooms never boost
+    adjust = mgr.make_adjuster(_room(tou_store_enabled=True), {}, decay=(0.2, 8.0))
+    assert adjust is not None
+    out = adjust(time.time() + 60.0, TargetTemps(heat=21.0, cool=24.0))
+    assert out.heat == 21.0 and out.cool == 24.0
 
-    booster = mgr.make_adjuster(_room(tou_mode="setback_boost"), {})
-    assert booster is not None
-    boosted = booster(time.time() + 60.0, TargetTemps(heat=21.0, cool=24.0))
-    assert boosted.heat == 23.0
-    assert boosted.cool == 22.0
-
-    off = mgr.make_adjuster(_room(tou_mode="off"), {})
-    assert off is None
-    forced_off = booster(time.time() + 60.0, TargetTemps(heat=None, cool=None))
+    off = mgr.make_adjuster(_room(), {}, decay=(0.2, 8.0))
+    assert off is None  # no store, no rows, no blocks: no participation
+    forced_off = adjust(time.time() + 60.0, TargetTemps(heat=None, cool=None))
     assert forced_off == TargetTemps(heat=None, cool=None)  # off stays off
 
 
-def test_boost_gates_on_presence_vacation_and_cap() -> None:
-    mgr = TouManager(_make_hass({}))
-    mgr._timeline = _timeline((TOU_TIER_ULTRA_LOW, 120))
-    ts = time.time() + 60.0
-    room = _room(tou_mode="setback_boost", tou_max_boost=22.5)
-
-    away = mgr.make_adjuster(room, {}, room_vacant=True, presence_away=False)
-    assert away is not None
-    assert away(ts, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
-
-    unoccupied = mgr.make_adjuster({**room, "tou_boost_unoccupied": True}, {}, room_vacant=True)
-    assert unoccupied is not None
-    assert unoccupied(ts, TargetTemps(heat=21.0, cool=24.0)).heat == 22.5  # capped
-
-    vacation_settings = {"vacation_until": time.time() + 3600, "vacation_temp": 15.0}
-    vac = mgr.make_adjuster(room, vacation_settings)
-    assert vac is not None
-    assert vac(ts, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0  # no boost in vacation
-
-
-def test_boost_only_charges_without_relaxing() -> None:
-    """boost_only: ultra-low pre-charges; mid/peak leave the schedule untouched."""
+def test_store_precharge_bounds_and_gates() -> None:
+    """Raise toward the coast floor before a run, bounded by the swing and the
+    consent band; skipped for vacation and immature models; presence-blind."""
     mgr = TouManager(_make_hass({}))
     b = time.time()
-    mgr._timeline = _timeline((TOU_TIER_ULTRA_LOW, 60), (TOU_TIER_PEAK, 60), (TOU_TIER_MID, 60))
-    adjust = mgr.make_adjuster(_room(tou_mode="boost_only"), {})
-    assert adjust is not None
-    # ultra-low: the same charge a setback_boost room gets
-    charged = adjust(b + 30 * 60, TargetTemps(heat=21.0, cool=24.0))
-    assert charged.heat == 23.0
-    assert charged.cool == 22.0
-    # peak: no heat floor, no cool ceiling — the schedule stands
-    peak = adjust(b + 90 * 60, TargetTemps(heat=21.0, cool=24.0))
-    assert peak.heat == 21.0
-    assert peak.cool == 24.0
-    # mid: no setback delta either
-    assert adjust(b + 150 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
+    mgr._timeline = _timeline((TOU_TIER_ULTRA_LOW, 60), (TOU_TIER_PEAK, 300))
+    ts = b + 30 * 60  # mid cheap window, the (long) peak still ahead
+    decay = (0.2, 10.0)
+    room = _room(tou_store_enabled=True)
+
+    raised = mgr.make_adjuster(room, {}, decay=decay)
+    assert raised is not None
+    # floor_end 18, huge lead → needed() explodes → the swing cap rules: 21 + 3.
+    assert raised(ts, TargetTemps(heat=21.0, cool=None)).heat == 24.0
+
+    capped = mgr.make_adjuster({**room, "tou_heat_max": 22.5}, {}, decay=decay)
+    assert capped is not None
+    assert capped(ts, TargetTemps(heat=21.0, cool=None)).heat == 22.5  # the band wins
+
+    vacant = mgr.make_adjuster(room, {}, room_vacant=True, presence_away=True, decay=decay)
+    assert vacant is not None
+    assert vacant(ts, TargetTemps(heat=21.0, cool=None)).heat == 24.0  # economics, not occupancy
+
+    vacation = {"vacation_until": b + 3600.0, "vacation_temp": 15.0}
+    vac = mgr.make_adjuster(room, vacation, decay=decay)
+    assert vac is not None
+    assert vac(ts, TargetTemps(heat=21.0, cool=None)).heat == 21.0  # no pre-charge in vacation
+
+    inside = mgr.make_adjuster(room, {}, decay=decay)
+    assert inside is not None
+    assert inside(b + 90 * 60, TargetTemps(heat=21.0, cool=None)).heat == 18.0  # the run relaxes
+
+    no_model = mgr.make_adjuster(room, {})
+    assert no_model is not None
+    assert no_model(ts, TargetTemps(heat=21.0, cool=None)).heat == 21.0  # nothing to derive from
+
+
+def test_store_prechills_and_relaxes_cooling_run() -> None:
+    """Cooling mirrors heating: drift up toward the eco ceiling during an
+    expensive run, pre-chill within the swing before it, and degrade the
+    same way (no chill without a model, none during vacation)."""
+    mgr = TouManager(_make_hass({}))
+    b = time.time()
+    mgr._timeline = _timeline((TOU_TIER_OFF, 60), (TOU_TIER_PEAK, 600))
+    ts = b + 30 * 60  # inside the off stretch, the (long) peak ahead
+    room = _room(tou_store_enabled=True)
+
+    # Pre-chill: outdoor 35 °C will pull the room up; the demand lands on the
+    # swing floor (comfort_cool 24 − 3), never deeper.
+    chilled = mgr.make_adjuster(room, {}, decay=(0.2, 35.0))
+    assert chilled is not None
+    assert chilled(ts, TargetTemps(heat=None, cool=24.0)).cool == 21.0
+
+    # During the run: relaxed toward min(swing, band, eco_cool) = 27.
+    inside = mgr.make_adjuster(room, {}, decay=(0.2, 35.0))
+    assert inside is not None
+    assert inside(b + 90 * 60, TargetTemps(heat=None, cool=24.0)).cool == 27.0
+
+    # No model: nothing to derive a chill from — the schedule stands.
+    no_model = mgr.make_adjuster(room, {})
+    assert no_model is not None
+    assert no_model(ts, TargetTemps(heat=None, cool=24.0)).cool == 24.0
+
+    # Vacation: no pre-chill spending.
+    vacation = {"vacation_until": b + 3600.0, "vacation_temp": 28.0}
+    vac = mgr.make_adjuster(room, vacation, decay=(0.2, 35.0))
+    assert vac is not None
+    assert vac(ts, TargetTemps(heat=None, cool=24.0)).cool == 24.0
+
+    # A cool target that would need warming *down* (outdoor below the
+    # ceiling) has no coast to exploit: untouched.
+    mild = mgr.make_adjuster(room, {}, decay=(0.2, 20.0))
+    assert mild is not None
+    assert mild(ts, TargetTemps(heat=None, cool=24.0)).cool == 24.0
 
 
 def test_override_never_shaved() -> None:
     mgr = TouManager(_make_hass({}))
     mgr._timeline = _timeline((TOU_TIER_PEAK, 120))
-    room = _room(override_heat=24.0, override_cool=None, override_until=None)
+    room = _room(tou_store_enabled=True, override_heat=24.0, override_cool=None, override_until=None)
     adjust = mgr.make_adjuster(room, {})
     assert adjust is not None
     result = adjust(time.time() + 60.0, TargetTemps(heat=24.0, cool=27.0))
     assert result.heat == 24.0  # the override value passes through untouched
 
 
-def test_mold_active_blocks_heat_setback() -> None:
+def test_mold_active_blocks_heat_relaxation() -> None:
     mgr = TouManager(_make_hass({}))
     mgr._timeline = _timeline((TOU_TIER_PEAK, 120))
-    adjust = mgr.make_adjuster(_room(), {}, mold_active=True)
+    adjust = mgr.make_adjuster(_room(tou_store_enabled=True), {}, mold_active=True)
     assert adjust is not None
     result = adjust(time.time() + 60.0, TargetTemps(heat=21.0, cool=24.0))
-    assert result.heat == 21.0  # prevention outranks tariff setback
-    assert result.cool == 28.0  # cooling side is unaffected
+    assert result.heat == 21.0  # prevention outranks tariff relaxation
+    assert result.cool == 27.0  # cooling side is unaffected
 
 
 # ---------------------------------------------------------------------------
@@ -610,13 +643,13 @@ def test_row_window_duration_end() -> None:
     )
     adjust = mgr.make_adjuster(room, settings)
     assert adjust is not None
-    # Inside the row window: the rule's temperature replaces peak setback.
+    # Inside the row window: the rule's temperature replaces the schedule.
     inside = adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0))
     assert inside.heat == 19.0
-    # Blank cool side: the rule skips cooling; plain peak ceiling shaping applies.
-    assert inside.cool == 28.0
-    # After the 30-minute hold (still inside the peak segment): setback 18 again.
-    assert adjust(boundary + 31 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
+    # Blank cool side: the rule skips cooling; the plain target stands.
+    assert inside.cool == 24.0
+    # After the 30-minute hold (still inside the peak segment): schedule resumes.
+    assert adjust(boundary + 31 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
 
 
 def test_record_tier_change_end_with_cap() -> None:
@@ -652,7 +685,7 @@ def test_record_tier_change_end_with_cap() -> None:
     adjust = mgr.make_adjuster(_room(), settings)
     assert adjust is not None
     assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 19.0
-    assert adjust(boundary + 91 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
+    assert adjust(boundary + 91 * 60, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
 
 
 def test_row_side_blanks_skip_per_mode() -> None:
@@ -687,21 +720,18 @@ def test_row_side_blanks_skip_per_mode() -> None:
     assert out.heat == 18.5
     assert out.cool == 26.0
 
-    # Heating blank: the rule is skipped there (plain peak cap applies), cooling holds.
+    # Heating blank: the rule is skipped there (plain target stands), cooling holds.
     room, settings = _room_schedule(row(heat=None, cool=26.0))
     adjust = mgr.make_adjuster(room, settings)
     assert adjust is not None
     out = adjust(boundary + 60.0, TargetTemps(heat=21.0, cool=24.0))
-    assert out.heat == 18.0
+    assert out.heat == 21.0
     assert out.cool == 26.0
 
-    # Both blank: no window at all — plain peak shaping on both sides.
+    # Both blank: no window at all — and with no store layer and no blocks
+    # there is nothing for the adjuster to do.
     room, settings = _room_schedule(row(heat=None, cool=None))
-    adjust = mgr.make_adjuster(room, settings)
-    assert adjust is not None
-    out = adjust(boundary + 60.0, TargetTemps(heat=21.0, cool=24.0))
-    assert out.heat == 18.0
-    assert out.cool == 28.0
+    assert mgr.make_adjuster(room, settings) is None
 
 
 def test_row_window_ends_at_next_boundary() -> None:
@@ -838,9 +868,9 @@ def test_schedule_disabled_section_cannot_steer() -> None:
         enabled=False,
     )
     assert TouManager.row_records(room, TouManager.rule_library(settings)) == []
-    adjust = mgr.make_adjuster(room, settings)
+    # The room participates via the store toggle; the gated rows never fire.
+    adjust = mgr.make_adjuster({**room, "tou_store_enabled": True}, settings)
     assert adjust is not None
-    # Section off: plain peak setback stands, the referenced rule never fires.
     assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=None)).heat == 18.0
     # Rows still exist for the library's reference count — enabling brings them back.
     room_on = {**room, "tou_schedule_enabled": True}
@@ -880,7 +910,7 @@ def test_row_arrive_curve_derives_boundary_temperature() -> None:
             }
         ]
     }
-    room = _room(tou_mode="setback")
+    room = _room()
     adjust = mgr.make_adjuster(room, settings, decay=(0.1, 10.0))
     assert adjust is not None
 
@@ -940,8 +970,8 @@ def test_row_arrive_coast_through_lands_at_period_end() -> None:
     assert rec["edge"] == "start"  # forced: the coast begins when the period starts
     assert rec["value"] == {"mode": "arrive", "temp": 19.0}
 
-    adjust = mgr.make_adjuster({**room, "tou_mode": "off"}, settings)
-    assert adjust is None  # rows need a participating room: mode off keeps them inert
+    adjust = mgr.make_adjuster({**room, "tou_schedule_enabled": False}, settings)
+    assert adjust is None  # store off and the section gated: nothing participates
     adjust = mgr.make_adjuster({**room, "tou_schedule_enabled": True}, settings, decay=(0.1, 10.0))
     assert adjust is not None
 
@@ -957,9 +987,9 @@ def test_row_arrive_coast_through_lands_at_period_end() -> None:
     assert mid == pytest.approx(expected(b + 2 * 3600.0)) and mid < at_start
     # ...landing exactly on the arrival temperature as the period ends.
     assert adjust(b + 4 * 3600.0 - 1.0, TargetTemps(heat=21.0, cool=None)).heat == pytest.approx(19.0, abs=0.02)
-    # Before and after the period the row keeps its hands off: the mid-peak
-    # setback still shapes pre-window blocks (21 − 2), the off tier leaves 21.
-    assert adjust(b - 60.0, TargetTemps(heat=21.0, cool=None)).heat == 19.0
+    # Before and after the period the row keeps its hands off; with the store
+    # layer off, the plain schedule stands on both sides.
+    assert adjust(b - 60.0, TargetTemps(heat=21.0, cool=None)).heat == 21.0
     assert adjust(b + 4 * 3600.0 + 60.0, TargetTemps(heat=21.0, cool=None)).heat == 21.0
 
 
@@ -990,7 +1020,7 @@ def test_row_arrive_fallbacks_flat() -> None:
         "value": {"mode": "arrive", "temp": 20.0},
     }
     settings = {"tou_schedules": [rec]}
-    room = _room(tou_mode="setback_boost")
+    room = _room()
 
     # No learned model yet: flat 20 across the window.
     adjust = mgr.make_adjuster(room, settings)
@@ -1034,7 +1064,7 @@ def test_row_arrive_clamped_by_band() -> None:
             }
         ]
     }
-    adjust = mgr.make_adjuster(_room(tou_mode="setback_boost"), settings, decay=(1.0, -20.0))
+    adjust = mgr.make_adjuster(_room(), settings, decay=(1.0, -20.0))
     assert adjust is not None
     assert adjust(b, TargetTemps(heat=21.0, cool=None)).heat == 28.0  # clamp_max default
 
@@ -1088,7 +1118,6 @@ def test_preview_includes_room_rows() -> None:
     rooms = {
         "living": {
             "area_id": "living",
-            "tou_mode": "setback",
             "tou_schedule_enabled": True,
             "tou_overrides": [{"id": "r1", "rule_id": "shared1", "enabled": True}],
         }
@@ -1347,12 +1376,12 @@ def test_record_requires_matching_room_and_enabled() -> None:
     }
     adjust = mgr.make_adjuster(_room(), {"tou_schedules": [rec]})
     assert adjust is not None
-    assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
+    assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
 
     disabled = {**rec, "rooms": ["living"], "enabled": False}
     adjust2 = mgr.make_adjuster(_room(), {"tou_schedules": [disabled]})
     assert adjust2 is not None
-    assert adjust2(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
+    assert adjust2(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 21.0
 
     # A row is scoped to its own room by construction: it compiles for "living".
     row_room, row_settings = _room_schedule(
@@ -1444,13 +1473,13 @@ def test_record_next_change_holds_until_boundary() -> None:
 def test_price_builder_gating() -> None:
     mgr = TouManager(_make_hass({}))
     mgr._timeline = _timeline((TOU_TIER_OFF, 60), (TOU_TIER_PEAK, 60))
-    builder = mgr.make_price_series_builder(_room(), {"tou_enabled": True})
+    builder = mgr.make_price_series_builder(_room(tou_store_enabled=True), {"tou_enabled": True})
     assert builder is not None
     # One hour per block: block 0 sits in OFF, the rest land past the +60min boundary.
     series = builder(time.time(), 4, 60.0)
     assert series[0] == 1.0  # off
     assert series[-1] == 3.0  # peak
-    assert mgr.make_price_series_builder(_room(tou_mode="off"), {}) is None
+    assert mgr.make_price_series_builder(_room(), {}) is None
     assert mgr.make_price_series_builder(_room(), {"tou_price_weighting": False}) is None
     no_timeline = TouManager(_make_hass({}))
     assert no_timeline.make_price_series_builder(_room(), {}) is None
@@ -1649,10 +1678,10 @@ def test_rules_ignore_malformed_entries() -> None:
     room["tou_overrides"].append({"id": "r-good", "rule_id": "ok", "enabled": False})
     records = TouManager.row_records(room, TouManager.rule_library(settings))
     assert records == []
-    adjust = mgr.make_adjuster(room, settings)
+    # The store toggle carries participation; none of the malformed rules made a window.
+    adjust = mgr.make_adjuster({**room, "tou_store_enabled": True}, settings)
     assert adjust is not None
-    # None of the malformed rules produced a window: plain peak setback applies.
-    assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0
+    assert adjust(boundary + 120, TargetTemps(heat=21.0, cool=24.0)).heat == 18.0  # the run relaxes
 
 
 def test_unified_chain_arrive_coast_and_occupied_override() -> None:

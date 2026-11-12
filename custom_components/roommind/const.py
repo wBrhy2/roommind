@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "1.9.0-beta.13"
+VERSION = "1.9.0-beta.15"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -255,12 +255,11 @@ TOU_TIER_ULTRA_LOW = "ultra_low"
 TOU_TIER_UNKNOWN = "unknown"
 TOU_TIERS = [TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW]
 
-# Per-room participation level (room["tou_mode"]).
-TOU_MODE_OFF = "off"
-TOU_MODE_SETBACK = "setback"
-TOU_MODE_SETBACK_BOOST = "setback_boost"
-TOU_MODE_BOOST_ONLY = "boost_only"
-TOU_MODES = [TOU_MODE_OFF, TOU_MODE_SETBACK, TOU_MODE_SETBACK_BOOST, TOU_MODE_BOOST_ONLY]
+# Room participation is two switches (room["tou_store_enabled"] for the
+# economic store layer, room["tou_schedule_enabled"] for tariff rows), not a
+# posture enum: the old setback/boost tiers are gone, their shaping replaced by
+# the store layer's band + swing + gap limits below and by rules for anything
+# bespoke.
 
 # Which entity class the panel treats as THE source for the current tier and
 # for future-tier lookahead. "auto" = legacy cascade (period -> flags -> rate;
@@ -314,13 +313,17 @@ TOU_ARRIVAL_MIN_CONFIDENCE = 0.5
 TOU_BLOCK_GATES = ["always", "occupied", "away"]
 TOU_BLOCK_SIDES = ["heat", "cool", "both"]
 
-# Tier shaping defaults (settings, all °C internal like the rest of the model).
-DEFAULT_TOU_PEAK_HEAT_FLOOR = 18.0  # PEAK: heat target never above this
-DEFAULT_TOU_PEAK_COOL_CEILING = 28.0  # PEAK: cool target never below this
-DEFAULT_TOU_MID_SETBACK_DELTA = 2.0  # MID: heat −δ / cool +δ
-DEFAULT_TOU_BOOST_DELTA = 2.0  # ULTRA_LOW: heat +δ / cool −δ (boost rooms only)
-DEFAULT_TOU_CLAMP_MIN = 17.0  # final safety band on the adjusted target
-DEFAULT_TOU_CLAMP_MAX = 28.0
+# Store-layer limits (settings; every value optionally overridden per room).
+# The band is the hard consent: no tariff machinery — store curve or row —
+# commands a target outside it. The swing bounds how far the auto layer moves
+# a room from its schedule/eco target; the gap is the price ratio that must
+# justify even trying (expensive ÷ cheapest preceding window).
+DEFAULT_TOU_HEAT_MIN = 17.0  # heating target never below this
+DEFAULT_TOU_HEAT_MAX = 28.0  # heating target (store ceiling) never above this
+DEFAULT_TOU_COOL_MIN = 18.0  # cooling target (pre-chill floor) never below this
+DEFAULT_TOU_COOL_MAX = 30.0  # cooling target never above this
+DEFAULT_TOU_SWING = 3.0  # max auto deviation from the scheduled target, °C
+DEFAULT_TOU_STORE_GAP = 1.0  # min expensive/cheap price multiplier ratio
 DEFAULT_TOU_COAST_MAX_MINUTES = 480  # cap when a tier_window end is not in the timeline
 
 # How far ahead the tariff timeline is built (minutes). Covers the MPC's

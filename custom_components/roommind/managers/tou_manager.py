@@ -4,16 +4,20 @@ Reads the configured tariff source (rate/period/next-change sensors, tariff
 calendars, or plain tier flags), builds a per-cycle tier timeline, and exposes:
 
 * ``make_adjuster``  — a target-temperature modifier spliced into the schedule
-  target resolver, applying tier setback/boost shaping and tariff-schedule
-  windows. A schedule window behaves exactly like a synthesized schedule
-  block: the MPC treats it as the next scheduled target, so conditioning
-  stops at the tier boundary and the learned thermal model coasts the room
-  through the expensive window on stored heat (mirrored for cooling).
+  target resolver, applying the store layer and tariff-schedule windows. The
+  store layer (``tou_store_enabled``) relaxes targets across future expensive
+  stretches and sizes a pre-charge so a coasting room lands on its floor as
+  the stretch ends — bounded by the consent band, the max deviation (swing)
+  and gated by the price ratio that justifies it (gap). A schedule window
+  behaves exactly like a synthesized schedule block: the MPC treats it as the
+  next scheduled target, so conditioning stops at the tier boundary and the
+  learned thermal model coasts the room through the expensive window on
+  stored heat (mirrored for cooling).
   Windows come from two sources: the advanced global ``tou_schedules``
   records and the room's ``tou_overrides`` rows — thin references
   (``{id, rule_id, enabled}``) into the shared rule library
   (``settings["tou_rules"]``) that the user authors on the device card as
-  (tier) (action) (heat) (cool) (end); same name means same rule in every
+  (action) (anchor) (heat) (cool) (end); same name means same rule in every
   room. The per-room ``tou_schedule_enabled`` toggle gates the whole
   schedule.
 * ``make_price_builder`` — per-block energy-price multipliers that scale the
@@ -24,13 +28,11 @@ calendars, or plain tier flags), builds a per-cycle tier timeline, and exposes:
 Safety rules encoded by the adjuster:
 * a manual override at the timestamp is never shaved by tariff logic;
 * "off" targets (None sides) stay off;
-* setback never *raises* demand; boost never *lowers* it;
-* boost only for rooms whose mode charges (``setback_boost``/``boost_only``),
-  not during vacation, and only when
-  occupied unless ``tou_boost_unoccupied`` is set;
-* heat-lowering steps are skipped while mold prevention is active;
-* every shift is guarded by the clamp band without overriding user targets
-  that already sit outside it.
+* the store layer never relaxes past the schedule's own eco target, never
+  leaves the consent band, and skips its raise during vacation;
+* heat-relaxing steps are skipped while mold prevention is active;
+* every shift is bounded by the per-side band without overriding user
+  targets that already sit outside it.
 """
 
 from __future__ import annotations
@@ -47,13 +49,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from ..const import (
-    DEFAULT_TOU_BOOST_DELTA,
-    DEFAULT_TOU_CLAMP_MAX,
-    DEFAULT_TOU_CLAMP_MIN,
+    DEFAULT_ECO_COOL,
+    DEFAULT_ECO_HEAT,
     DEFAULT_TOU_COAST_MAX_MINUTES,
-    DEFAULT_TOU_MID_SETBACK_DELTA,
-    DEFAULT_TOU_PEAK_COOL_CEILING,
-    DEFAULT_TOU_PEAK_HEAT_FLOOR,
+    DEFAULT_TOU_COOL_MAX,
+    DEFAULT_TOU_COOL_MIN,
+    DEFAULT_TOU_HEAT_MAX,
+    DEFAULT_TOU_HEAT_MIN,
+    DEFAULT_TOU_STORE_GAP,
+    DEFAULT_TOU_SWING,
     TOU_ARRIVAL_EXPONENT_CAP,
     TOU_SOURCE_FLAGS,
     TOU_SOURCE_NONE,
@@ -695,40 +699,49 @@ class TouManager:
     ) -> AdjustFn | None:
         """Build the per-room adjuster, or None when the room does not participate.
 
-        The returned callable maps (timestamp, resolved targets) to TOU-adjusted
-        targets and is composed into the schedule target resolver, so the whole
-        MPC horizon — and the bang-bang "now" target — become tariff-aware.
+        Participation means: the store toggle is on, or the room has tariff
+        rows, or it has user schedule blocks. The returned callable maps
+        (timestamp, resolved targets) to TOU-adjusted targets and is composed
+        into the schedule target resolver, so the whole MPC horizon — and the
+        bang-bang "now" target — become tariff-aware.
 
         ``decay`` is the room's learned (alpha, outdoor_temp) pair when the
-        thermal model is confident enough to derive "arrive" curves; None
-        makes those records hold their flat target (classic coast behavior).
+        thermal model is confident enough to derive coast curves; None keeps
+        the store layer's pre-charge and "arrive" records at their flat
+        target (classic coast behavior).
         """
         timeline = self._timeline
-        mode = str(room.get("tou_mode", "off"))
-        if timeline is None or mode not in ("setback", "setback_boost", "boost_only"):
+        if timeline is None:
+            return None
+        store_enabled = bool(room.get("tou_store_enabled", False))
+        area_id = str(room.get("area_id", ""))
+        records = self.schedules(settings) + self.row_records(room, self.rule_library(settings))
+        user_blocks = room.get("schedule_blocks") or []
+        if not store_enabled and not records and not user_blocks:
             return None
         if timeline.current_tier == TOU_TIER_UNKNOWN and not self._has_tiered_events(timeline):
             return None
-
-        area_id = str(room.get("area_id", ""))
-        records = self.schedules(settings) + self.row_records(room, self.rule_library(settings))
         tariff_windows = self._compile_schedules(area_id, settings, timeline, records)
-        user_blocks = room.get("schedule_blocks") or []
-        clamp_min = float(settings.get("tou_clamp_min", DEFAULT_TOU_CLAMP_MIN))
-        clamp_max = float(settings.get("tou_clamp_max", DEFAULT_TOU_CLAMP_MAX))
-        peak_floor = float(settings.get("tou_peak_heat_floor", DEFAULT_TOU_PEAK_HEAT_FLOOR))
-        peak_ceiling = float(settings.get("tou_peak_cool_ceiling", DEFAULT_TOU_PEAK_COOL_CEILING))
-        mid_delta = float(settings.get("tou_mid_setback_delta", DEFAULT_TOU_MID_SETBACK_DELTA))
-        boost_delta = float(settings.get("tou_boost_delta", DEFAULT_TOU_BOOST_DELTA))
-        boost_cap = room.get("tou_max_boost")
-        boost_cap = float(boost_cap) if isinstance(boost_cap, (int, float)) else clamp_max
-        # Participation postures: setback relaxes demand in mid/peak tiers,
-        # boost pre-charges in ultra-low windows. "setback_boost" does both,
-        # "boost_only" charges cheap and never relaxes, "setback" never
-        # charges above the schedule.
-        boost_allowed = mode in ("setback_boost", "boost_only")
-        setback_allowed = mode in ("setback", "setback_boost")
-        occupied = not room_vacant and not presence_away or bool(room.get("tou_boost_unoccupied", False))
+
+        def _num(value: Any, fallback: float) -> float:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                return fallback
+            try:
+                return float(value)
+            except ValueError:
+                return fallback
+
+        # Consent band per side plus the auto layer's reach: room overrides
+        # win over the global limits, blanks inherit.
+        heat_min = _num(room.get("tou_heat_min"), _num(settings.get("tou_heat_min"), DEFAULT_TOU_HEAT_MIN))
+        heat_max = _num(room.get("tou_heat_max"), _num(settings.get("tou_heat_max"), DEFAULT_TOU_HEAT_MAX))
+        cool_min = _num(room.get("tou_cool_min"), _num(settings.get("tou_cool_min"), DEFAULT_TOU_COOL_MIN))
+        cool_max = _num(room.get("tou_cool_max"), _num(settings.get("tou_cool_max"), DEFAULT_TOU_COOL_MAX))
+        swing = max(0.0, _num(room.get("tou_swing"), _num(settings.get("tou_swing"), DEFAULT_TOU_SWING)))
+        gap = max(1.0, _num(room.get("tou_store_gap"), _num(settings.get("tou_store_gap"), DEFAULT_TOU_STORE_GAP)))
+        eco_heat = _num(room.get("eco_heat", room.get("eco_temp")), DEFAULT_ECO_HEAT)
+        eco_cool = _num(room.get("eco_cool"), DEFAULT_ECO_COOL)
+        store_runs = self._store_runs(timeline, gap) if store_enabled else []
 
         override_heat = room.get("override_heat")
         override_cool = room.get("override_cool")
@@ -737,6 +750,14 @@ class TouManager:
         vacation_until = settings.get("vacation_until")
         vacation_temp = settings.get("vacation_temp")
         room_occupied = not room_vacant and not presence_away
+
+        def _heat_floor(plain: float) -> float:
+            # Relaxation bound: swing from the schedule, never below the eco
+            # target, never outside the band, never above a lower plain target.
+            return min(plain, max(plain - swing, heat_min, eco_heat))
+
+        def _cool_ceiling(plain: float) -> float:
+            return max(plain, min(plain + swing, cool_max, eco_cool))
 
         def adjust(ts: float, targets: TargetTemps) -> TargetTemps:
             heat, cool = targets.heat, targets.cool
@@ -749,32 +770,45 @@ class TouManager:
                     return targets  # a manual override is never shaved
             vacation_now = vacation_until is not None and ts < float(vacation_until) and vacation_temp is not None
             # Unified target chain, weakest first: schedule (plain, already
-            # resolved upstream) -> tier shaping -> tariff schedule records ->
+            # resolved upstream) -> store layer -> tariff schedule records ->
             # user schedule blocks. Manual override, vacation and the mold /
             # climate-mode guards keep priority; off stays off.
-            tier = timeline.tier_at(ts)
             shaped_heat, shaped_cool = heat, cool
-            if heat is not None:
-                if tier == TOU_TIER_PEAK and setback_allowed and not mold_active:
-                    shaped_heat = min(heat, peak_floor)
-                elif tier == TOU_TIER_MID and setback_allowed and not mold_active:
-                    shaped_heat = max(heat - mid_delta, min(heat, clamp_min))
-                elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
-                    shaped_heat = max(min(heat + boost_delta, boost_cap), heat)
-            if cool is not None:
-                if tier == TOU_TIER_PEAK and setback_allowed:
-                    shaped_cool = max(cool, peak_ceiling)
-                elif tier == TOU_TIER_MID and setback_allowed:
-                    shaped_cool = min(cool + mid_delta, max(cool, clamp_max))
-                elif tier == TOU_TIER_ULTRA_LOW and boost_allowed and not vacation_now and occupied:
-                    shaped_cool = min(max(cool - boost_delta, min(cool, clamp_min)), cool)
+            if store_runs:
+                run_now = next((r for r in store_runs if r[0] <= ts < r[1]), None)
+                run_next = None if run_now is not None else next((r for r in store_runs if r[0] > ts), None)
+                if heat is not None:
+                    if run_now is not None:
+                        if not mold_active:
+                            shaped_heat = _heat_floor(heat)
+                    elif run_next is not None and decay is not None and not vacation_now:
+                        # Pre-charge: the temperature a coasting room needs
+                        # *now* to land on the floor as the run ends — the
+                        # same back-cast the arrive rows use, bounded by the
+                        # swing the room consented to.
+                        floor_end = _heat_floor(heat)
+                        alpha, t_out = decay
+                        if t_out < floor_end:
+                            exponent = min(alpha * (run_next[1] - ts) / 3600.0, TOU_ARRIVAL_EXPONENT_CAP)
+                            needed = t_out + (floor_end - t_out) * math.exp(exponent)
+                            shaped_heat = min(max(needed, heat), heat + swing, heat_max)
+                if cool is not None:
+                    if run_now is not None:
+                        shaped_cool = _cool_ceiling(cool)
+                    elif run_next is not None and decay is not None and not vacation_now:
+                        ceil_end = _cool_ceiling(cool)
+                        alpha, t_out = decay
+                        if t_out > ceil_end:
+                            exponent = min(alpha * (run_next[1] - ts) / 3600.0, TOU_ARRIVAL_EXPONENT_CAP)
+                            needed = t_out + (ceil_end - t_out) * math.exp(exponent)
+                            shaped_cool = max(min(needed, cool), cool - swing, cool_min)
             heat = _apply_tariff_windows(
                 tariff_windows["heat"],
                 ts,
                 targets.heat,
                 shaped_heat,  # type: ignore[arg-type]
-                clamp_min,
-                clamp_max,
+                heat_min,
+                heat_max,
                 mold_active,
                 vacation_now,
                 True,
@@ -785,8 +819,8 @@ class TouManager:
                 ts,
                 targets.cool,
                 shaped_cool,  # type: ignore[arg-type]
-                clamp_min,
-                clamp_max,
+                cool_min,
+                cool_max,
                 mold_active,
                 vacation_now,
                 False,
@@ -815,6 +849,35 @@ class TouManager:
             return TargetTemps(heat=heat, cool=cool)
 
         return adjust
+
+    @staticmethod
+    def _store_runs(timeline: TouTimeline, gap: float) -> list[tuple[float, float]]:
+        """Merge future stretches worth arbitraging across the timeline.
+
+        A segment is expensive when it costs above the off-peak reference
+        (multiplier 1.0), a cheaper window exists to arbitrage against, and
+        the ratio clears ``gap``. The reference is the cheapest other segment;
+        with a single-tier horizon (no future view) it falls back to 1.0, so
+        the active expensive tier still relaxes — shaping without lookahead —
+        while nothing gets pre-charged (there is no later boundary to aim at).
+        Contiguous expensive segments merge into one run: the store layer
+        relaxes targets across the whole run and sizes a pre-charge so a
+        coasting room lands on its floor as the run ends.
+        """
+        segs = timeline.segments
+        mults = [tou_price_multiplier(s.tier) for s in segs]
+        runs: list[tuple[float, float]] = []
+        for i, seg in enumerate(segs):
+            m = mults[i]
+            others = mults[:i] + mults[i + 1 :]
+            reference = min(others) if others else 1.0
+            cheaper_exists = reference < m if others else m > 1.0
+            if m > 1.0 and cheaper_exists and m >= gap * reference:
+                if runs and abs(runs[-1][1] - seg.start) < 1.0:
+                    runs[-1] = (runs[-1][0], max(runs[-1][1], seg.end))
+                else:
+                    runs.append((seg.start, seg.end))
+        return runs
 
     @staticmethod
     def _has_tiered_events(timeline: TouTimeline) -> bool:
@@ -1121,7 +1184,9 @@ class TouManager:
         timeline = self._timeline
         if timeline is None or not settings.get("tou_price_weighting", True):
             return None
-        if str(room.get("tou_mode", "off")) == "off":
+        if not room.get("tou_store_enabled", False) and not (
+            self.schedules(settings) or self.row_records(room, self.rule_library(settings))
+        ):
             return None
 
         def build(start_ts: float, n_blocks: int, dt_minutes: float) -> list[float]:

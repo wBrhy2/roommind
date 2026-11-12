@@ -88,12 +88,12 @@ export class RsSettings extends LitElement {
   @state() private _touFlagEntities: Record<string, string> = {};
   @state() private _touPriceWeighting = true;
   @state() private _touThresholds: Record<string, string> = {};
-  @state() private _touPeakHeatFloor = 18;
-  @state() private _touPeakCoolCeiling = 28;
-  @state() private _touMidSetbackDelta = 2;
-  @state() private _touBoostDelta = 2;
-  @state() private _touClampMin = 17;
-  @state() private _touClampMax = 28;
+  @state() private _touHeatMin = 17;
+  @state() private _touHeatMax = 28;
+  @state() private _touCoolMin = 18;
+  @state() private _touCoolMax = 30;
+  @state() private _touSwing = 3;
+  @state() private _touStoreGap = 1;
   @state() private _coilDryEnabled = false;
   @state() private _coilDryMinutes = 20;
   @state() private _coilDryMode: "fan_only" | "dry" = "fan_only";
@@ -179,12 +179,12 @@ export class RsSettings extends LitElement {
         tou_mid_threshold: s.tou_mid_threshold != null ? String(s.tou_mid_threshold) : "",
         tou_ultra_threshold: s.tou_ultra_threshold != null ? String(s.tou_ultra_threshold) : "",
       };
-      this._touPeakHeatFloor = s.tou_peak_heat_floor ?? 18;
-      this._touPeakCoolCeiling = s.tou_peak_cool_ceiling ?? 28;
-      this._touMidSetbackDelta = s.tou_mid_setback_delta ?? 2;
-      this._touBoostDelta = s.tou_boost_delta ?? 2;
-      this._touClampMin = s.tou_clamp_min ?? 17;
-      this._touClampMax = s.tou_clamp_max ?? 28;
+      this._touHeatMin = s.tou_heat_min ?? 17;
+      this._touHeatMax = s.tou_heat_max ?? 28;
+      this._touCoolMin = s.tou_cool_min ?? 18;
+      this._touCoolMax = s.tou_cool_max ?? 30;
+      this._touSwing = s.tou_swing ?? 3;
+      this._touStoreGap = s.tou_store_gap ?? 1;
       this._coilDryEnabled = s.coil_dry_enabled ?? false;
       this._coilDryMinutes = s.coil_dry_minutes ?? 20;
       this._coilDryMode = s.coil_dry_mode ?? "fan_only";
@@ -360,12 +360,12 @@ export class RsSettings extends LitElement {
           .touFlagEntities=${this._touFlagEntities}
           .touPriceWeighting=${this._touPriceWeighting}
           .touThresholds=${this._touThresholds}
-          .touPeakHeatFloor=${this._touPeakHeatFloor}
-          .touPeakCoolCeiling=${this._touPeakCoolCeiling}
-          .touMidSetbackDelta=${this._touMidSetbackDelta}
-          .touBoostDelta=${this._touBoostDelta}
-          .touClampMin=${this._touClampMin}
-          .touClampMax=${this._touClampMax}
+          .touHeatMin=${this._touHeatMin}
+          .touHeatMax=${this._touHeatMax}
+          .touCoolMin=${this._touCoolMin}
+          .touCoolMax=${this._touCoolMax}
+          .touSwing=${this._touSwing}
+          .touStoreGap=${this._touStoreGap}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-tou>
       </rs-settings-panel>
@@ -564,12 +564,12 @@ export class RsSettings extends LitElement {
         tou_peak_threshold: this._numOrNull(this._touThresholds["tou_peak_threshold"]),
         tou_mid_threshold: this._numOrNull(this._touThresholds["tou_mid_threshold"]),
         tou_ultra_threshold: this._numOrNull(this._touThresholds["tou_ultra_threshold"]),
-        tou_peak_heat_floor: this._touPeakHeatFloor,
-        tou_peak_cool_ceiling: this._touPeakCoolCeiling,
-        tou_mid_setback_delta: this._touMidSetbackDelta,
-        tou_boost_delta: this._touBoostDelta,
-        tou_clamp_min: this._touClampMin,
-        tou_clamp_max: this._touClampMax,
+        tou_heat_min: this._touHeatMin,
+        tou_heat_max: this._touHeatMax,
+        tou_cool_min: this._touCoolMin,
+        tou_cool_max: this._touCoolMax,
+        tou_swing: this._touSwing,
+        tou_store_gap: this._touStoreGap,
       });
       // Toggled again while the request was out: stays dirty, the queued save sends it.
       if (this._climateControlActive === sentClimateControl) this._climateControlDirty = false;

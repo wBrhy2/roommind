@@ -99,11 +99,13 @@ async def test_list_rooms_empty(ws_hass, store, connection):
             "coil_dry_drain_minutes": 0,
             "compressor_groups": [],
             "tou_rules": [],
-            "tou_shaping": {
-                "mid_setback_delta": 2.0,
-                "boost_delta": 2.0,
-                "peak_heat_floor": 18.0,
-                "peak_cool_ceiling": 28.0,
+            "tou_limits": {
+                "heat_min": 17.0,
+                "heat_max": 28.0,
+                "cool_min": 18.0,
+                "cool_max": 30.0,
+                "swing": 3.0,
+                "store_gap": 1.0,
             },
         },
     )
@@ -4114,19 +4116,21 @@ async def test_save_room_tou_fields(ws_hass, store, connection):
         "type": "roommind/rooms/save",
         "area_id": "living_room_abc12345",
         "thermostats": ["climate.living_room"],
-        "tou_mode": "setback_boost",
-        "tou_max_boost": 23.0,
-        "tou_boost_unoccupied": True,
+        "tou_store_enabled": True,
+        "tou_heat_max": 23.0,
+        "tou_swing": 2.5,
+        "tou_store_gap": 1.4,
     }
     await _save_room(ws_hass, connection, msg)
 
     connection.send_result.assert_called_once()
     room = connection.send_result.call_args[0][1]["room"]
-    assert room["tou_mode"] == "setback_boost"
-    assert room["tou_max_boost"] == 23.0
-    assert room["tou_boost_unoccupied"] is True
+    assert room["tou_store_enabled"] is True
+    assert room["tou_heat_max"] == 23.0
+    assert room["tou_swing"] == 2.5
+    assert room["tou_store_gap"] == 1.4
 
-    # boost_only is a full participation mode (schema + persistence).
+    # Room overrides persist alongside a cleared one (blank inherits global).
     from homeassistant.components.websocket_api.messages import BASE_COMMAND_MESSAGE_SCHEMA
 
     msg2 = {
@@ -4134,8 +4138,13 @@ async def test_save_room_tou_fields(ws_hass, store, connection):
         "type": "roommind/rooms/save",
         "area_id": "living_room_abc12345",
         "thermostats": ["climate.living_room"],
-        "tou_mode": "boost_only",
+        "tou_store_enabled": False,
+        "tou_heat_max": None,
+        "tou_swing": 4.0,
     }
     BASE_COMMAND_MESSAGE_SCHEMA.extend(ROOM_SAVE_SCHEMA)(msg2)
     await _save_room(ws_hass, connection, msg2)
-    assert store.get_room("living_room_abc12345")["tou_mode"] == "boost_only"
+    saved = store.get_room("living_room_abc12345")
+    assert saved["tou_store_enabled"] is False
+    assert saved["tou_heat_max"] is None
+    assert saved["tou_swing"] == 4.0

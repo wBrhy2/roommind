@@ -48,9 +48,9 @@ async def _run_cycle(hass, mock_config_entry, *, room, settings, states):
 
 
 @pytest.mark.asyncio
-async def test_peak_setback_lowers_room_target(hass, mock_config_entry) -> None:
-    """A setback room on PEAK resolves its heat target to the tariff floor."""
-    room = {**SAMPLE_ROOM, "tou_mode": "setback"}
+async def test_store_relaxes_peak_target(hass, mock_config_entry) -> None:
+    """A storing room on PEAK resolves its heat target to the relaxation floor."""
+    room = {**SAMPLE_ROOM, "tou_store_enabled": True}
     data, _ = await _run_cycle(
         hass,
         mock_config_entry,
@@ -59,8 +59,8 @@ async def test_peak_setback_lowers_room_target(hass, mock_config_entry) -> None:
         states={"sensor.tou_period": "ulo_on_peak"},
     )
     state = data["rooms"][room["area_id"]]
-    assert state["heat_target"] == 18.0
-    assert state["cool_target"] == 28.0
+    assert state["heat_target"] == 18.0  # comfort 21 − swing 3, above eco 17
+    assert state["cool_target"] == 27.0  # drifts to the eco cooling ceiling
     snap = data["tou"]
     assert snap["enabled"] is True
     assert snap["tier"] == TOU_TIER_PEAK
@@ -69,7 +69,7 @@ async def test_peak_setback_lowers_room_target(hass, mock_config_entry) -> None:
 @pytest.mark.asyncio
 async def test_tou_off_leaves_target_untouched(hass, mock_config_entry) -> None:
     """Without tou_enabled the cycle ignores period entities entirely."""
-    room = {**SAMPLE_ROOM, "tou_mode": "setback"}
+    room = {**SAMPLE_ROOM, "tou_store_enabled": True}
     data, _ = await _run_cycle(
         hass,
         mock_config_entry,
@@ -83,9 +83,9 @@ async def test_tou_off_leaves_target_untouched(hass, mock_config_entry) -> None:
 
 
 @pytest.mark.asyncio
-async def test_room_mode_off_ignores_active_peak(hass, mock_config_entry) -> None:
-    """Rooms that do not opt in keep their schedule during PEAK."""
-    room = {**SAMPLE_ROOM, "tou_mode": "off"}
+async def test_unopted_room_ignores_active_peak(hass, mock_config_entry) -> None:
+    """Rooms without the store toggle keep their schedule during PEAK."""
+    room = dict(SAMPLE_ROOM)
     data, _ = await _run_cycle(
         hass,
         mock_config_entry,
@@ -97,9 +97,9 @@ async def test_room_mode_off_ignores_active_peak(hass, mock_config_entry) -> Non
 
 
 @pytest.mark.asyncio
-async def test_ultra_low_boost_raises_opted_in_room(hass, mock_config_entry) -> None:
-    """setback_boost rooms pre-charge in the ultra-low window."""
-    room = {**SAMPLE_ROOM, "tou_mode": "setback_boost", "tou_max_boost": 23.0}
+async def test_ultra_low_without_future_view_does_not_raise(hass, mock_config_entry) -> None:
+    """A cheap tier with no timeline ahead relaxes nothing and raises nothing."""
+    room = {**SAMPLE_ROOM, "tou_store_enabled": True}
     data, _ = await _run_cycle(
         hass,
         mock_config_entry,
@@ -108,7 +108,7 @@ async def test_ultra_low_boost_raises_opted_in_room(hass, mock_config_entry) -> 
         states={"sensor.tou_period": "ulo_overnight"},
     )
     state = data["rooms"][room["area_id"]]
-    assert state["heat_target"] == 23.0  # 21 + boost, capped at tou_max_boost
+    assert state["heat_target"] == 21.0  # comfort stands: the pre-charge needs a run to aim at
     assert data["tou"]["tier"] == TOU_TIER_ULTRA_LOW
 
 
@@ -117,7 +117,7 @@ async def test_override_outranks_peak_setback(hass, mock_config_entry) -> None:
     """A manual boost is never shaved by the tariff."""
     room = {
         **SAMPLE_ROOM,
-        "tou_mode": "setback",
+        "tou_store_enabled": True,
         "override_heat": 24.0,
         "override_cool": None,
         "override_until": None,
