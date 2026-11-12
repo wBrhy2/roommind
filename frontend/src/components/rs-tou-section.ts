@@ -26,6 +26,7 @@ import type {
   TouOverrideRow,
   TouOverrideUntil,
   TouRule,
+  TouRuleDef,
   TouTier,
 } from "../types";
 import { localize } from "../utils/localize";
@@ -86,8 +87,16 @@ export class RsTouSection extends LitElement {
   @property({ type: Boolean }) public editing = false;
 
   @state() private _expanded: Record<string, boolean> = {};
-  /** Rows whose rule the card edited this session (carry `definition`). */
-  @state() private _touched: Record<string, boolean> = {};
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    // The name field upgrades itself to an editable combobox once the runtime
+    // provides ha-combo-box; re-render when it lands (older HA never will,
+    // and the text-field fallback keeps working meanwhile).
+    if (!customElements.get("ha-combo-box")) {
+      customElements.whenDefined("ha-combo-box").then(() => this.requestUpdate());
+    }
+  }
 
   static styles = [
     inputStyles,
@@ -429,20 +438,19 @@ export class RsTouSection extends LitElement {
     }
     const usage = this._usageCount(row.rule_id);
     const isDelta = rule.action === "raise" || rule.action === "lower";
-    const update = (patch: Partial<TouRule>) => this._updateDef(row.id, patch);
+    const update = (patch: Partial<TouRuleDef>) => this._updateDef(row.id, patch);
     const range = tempRange(5, 35, this.hass);
     const sideLabel = (side: "heat" | "cool") =>
       `${localize(`tou.override_side.${side}`, l)}${isDelta ? ` Δ${tempUnit(this.hass)}` : ` ${tempUnit(this.hass)}`}`;
     return html`
       <div class="row-card">
-        ${head}
-        <ha-textfield
-          .value=${rule.name}
-          .label=${localize("tou.override_name", l)}
-          @change=${(e: Event) => update({ name: (e.target as HTMLInputElement).value })}
-        ></ha-textfield>
+        ${head} ${this._renderNameField(row, rule, l)}
         <div class="hint">
-          ${localize("tou.rename_hint", l)}
+          ${
+            customElements.get("ha-combo-box")
+              ? localize("tou.override_name_hint", l)
+              : localize("tou.rename_hint", l)
+          }
           ${usage > 1 ? html`<div class="usage-hint">${localize("tou.rule_used_in", l, { count: usage })}</div>` : nothing}
         </div>
 
@@ -645,10 +653,16 @@ export class RsTouSection extends LitElement {
 
   // ---- Row / rule state ----
 
-  /** The definition of a row: the in-session edit wins over the library copy. */
-  private _defOf(row: TouOverrideRow): TouRule | null {
+  /** The definition of a row: the in-session edit wins over the library copy.
+   * Library entries carry their id; a `definition` never may (ids are
+   * library-owned and the schema would reject the echo). */
+  private _defOf(row: TouOverrideRow): TouRuleDef | null {
     if (row.definition) return row.definition;
-    return this.rules.find((r) => r.id === row.rule_id) ?? null;
+    const rule = this.rules.find((r) => r.id === row.rule_id);
+    if (!rule) return null;
+    const def: Partial<TouRule> = { ...rule };
+    delete def.id;
+    return def as TouRuleDef;
   }
 
   private _usageCount(ruleId: string): number {
@@ -665,15 +679,61 @@ export class RsTouSection extends LitElement {
     this._emitRows(this.overrides.map((r) => (r.id === rowId ? { ...r, ...patch } : r)));
   }
 
-  private _updateDef(rowId: string, patch: Partial<TouRule>) {
+  private _updateDef(rowId: string, patch: Partial<TouRuleDef>) {
     const rows = this.overrides.map((r) => {
       if (r.id !== rowId) return r;
       const base = this._defOf(r);
       if (!base) return r;
-      this._touched = { ...this._touched, [rowId]: true };
       return { ...r, definition: { ...base, ...patch } };
     });
     this._emitRows(rows);
+  }
+
+  /**
+   * The name doubles as the rule picker. Choosing an existing rule's name
+   * switches this row to that shared rule (its config loads into the editor,
+   * the library stays as-is); typing a fresh name renames — the server then
+   * forks a derivative or, on a collision it cannot see from the name alone,
+   * merges onto the existing rule.
+   */
+  private _onNameChosen(row: TouOverrideRow, raw: string) {
+    const name = raw.trim();
+    if (!name) return;
+    const current = this._defOf(row);
+    if (!current || name === current.name) return;
+    const source = this.rules.find((r) => r.name === name);
+    if (source && source.id !== row.rule_id) {
+      this._emitRows(
+        this.overrides.map((r) =>
+          r.id === row.id ? { id: r.id, rule_id: source.id, enabled: r.enabled } : r,
+        ),
+      );
+      return;
+    }
+    this._updateDef(row.id, { name });
+  }
+
+  private _renderNameField(row: TouOverrideRow, rule: TouRuleDef, l: string) {
+    if (customElements.get("ha-combo-box")) {
+      return html`
+        <ha-combo-box
+          .label=${localize("tou.override_name", l)}
+          .value=${rule.name}
+          .items=${this.rules.map((r) => r.name)}
+          allow-custom-value
+          @value-changed=${(e: CustomEvent) => this._onNameChosen(row, String(e.detail?.value ?? ""))}
+        ></ha-combo-box>
+      `;
+    }
+    // Older HA without the combobox element: plain rename field; the bottom
+    // picker remains the way to copy an existing rule.
+    return html`
+      <ha-textfield
+        .value=${rule.name}
+        .label=${localize("tou.override_name", l)}
+        @change=${(e: Event) => this._updateDef(row.id, { name: (e.target as HTMLInputElement).value })}
+      ></ha-textfield>
+    `;
   }
 
   private _removeRow(idx: number) {
@@ -695,8 +755,7 @@ export class RsTouSection extends LitElement {
   private _addNewRule(l: string) {
     const ruleId = newId();
     const rowId = newId();
-    const definition: TouRule = {
-      id: ruleId,
+    const definition: TouRuleDef = {
       name: localize("tou.new_rule", l),
       tier: "peak",
       edge: "start",
@@ -710,7 +769,6 @@ export class RsTouSection extends LitElement {
       between: null,
     };
     this._expanded = { ...this._expanded, [rowId]: true };
-    this._touched = { ...this._touched, [rowId]: true };
     this._emitRows([...this.overrides, { id: rowId, rule_id: ruleId, enabled: true, definition }]);
   }
 
@@ -721,7 +779,7 @@ export class RsTouSection extends LitElement {
   // ---- Summary ----
 
   /** Compact one-line description of a rule, display units. */
-  private _summarize(rule: TouRule, l: string): string {
+  private _summarize(rule: TouRuleDef, l: string): string {
     const tier =
       rule.tier === TIER_ANY ? localize("tou.tier_any", l) : localize(`tou.tier.${rule.tier}`, l);
     const edge = localize(`tou.override_edge.${rule.edge === "end" ? "end" : "start"}`, l);

@@ -711,6 +711,7 @@
   "tou.override_enabled": "Row enabled",
   "tou.override_minutes": "Minutes",
   "tou.override_name": "Name",
+  "tou.override_name_hint": "Pick an existing name to switch this row to that shared rule; type a new one to rename (a fresh name forks a copy for this room).",
   "tou.override_side.cool": "Cooling",
   "tou.override_side.heat": "Heating",
   "tou.override_sides_hint": "Leave a side blank to skip this row in that mode — a heating-only row never touches cooling.",

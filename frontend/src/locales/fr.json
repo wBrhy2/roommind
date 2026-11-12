@@ -711,6 +711,7 @@
   "tou.override_enabled": "Ligne activée",
   "tou.override_minutes": "Minutes",
   "tou.override_name": "Nom",
+  "tou.override_name_hint": "Choisissez un nom existant pour baser cette ligne sur cette règle partagée ; saisissez-en un nouveau pour renommer (un nouveau nom crée une copie pour cette pièce).",
   "tou.override_side.cool": "Refroidissement",
   "tou.override_side.heat": "Chauffage",
   "tou.override_sides_hint": "Laisser un champ vide saute cette ligne dans ce mode — une ligne chauffage ne touche jamais le refroidissement.",

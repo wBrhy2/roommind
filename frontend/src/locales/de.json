@@ -711,6 +711,7 @@
   "tou.override_enabled": "Zeile aktiv",
   "tou.override_minutes": "Minuten",
   "tou.override_name": "Name",
+  "tou.override_name_hint": "Bestehenden Namen wählen, um die Zeile auf diese gemeinsame Regel umzustellen; einen neuen Namen tippen zum Umbenennen (ein neuer Name erstellt eine Kopie für diesen Raum).",
   "tou.override_side.cool": "Kühlen",
   "tou.override_side.heat": "Heizen",
   "tou.override_sides_hint": "Eine leere Seite überspringt die Zeile in diesem Modus – eine reine Heizzeile lässt die Kühlung unberührt.",

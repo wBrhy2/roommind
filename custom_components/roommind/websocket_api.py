@@ -596,135 +596,143 @@ async def websocket_list_rooms(
 # Save room (upsert: create or update)
 # ---------------------------------------------------------------------------
 
-
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "roommind/rooms/save",
-        vol.Required("area_id"): str,
-        vol.Optional("thermostats"): [str],
-        vol.Optional("acs"): [str],
-        vol.Optional("devices"): [
-            vol.All(
-                {
-                    vol.Required("entity_id"): str,
-                    vol.Required("type"): vol.In(["trv", "ac"]),
-                    vol.Optional("role", default="auto"): vol.In(["primary", "secondary", "auto"]),
-                    vol.Optional("heating_system_type", default=""): vol.In(["", "radiator", "underfloor"]),
-                    vol.Optional("idle_action", default="off"): vol.In(["off", "fan_only", "setback", "low"]),
-                    vol.Optional("idle_fan_mode", default="low"): str,
-                    # No default: devices without it keep their stored form (#255)
-                    vol.Optional("setback_auto_off"): bool,
-                    vol.Optional("setpoint_mode", default="proportional"): vol.In(["proportional", "direct"]),
-                    vol.Optional("setpoint_offset", default=0.0): vol.All(
-                        vol.Coerce(float), vol.Range(min=SETPOINT_OFFSET_MIN, max=SETPOINT_OFFSET_MAX)
-                    ),
-                    vol.Optional("coil_dry", default=COIL_DRY_INHERIT): vol.In(COIL_DRY_OVERRIDES),
-                    vol.Optional("coil_dry_minutes", default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
-                    vol.Optional("coil_dry_mode", default=""): vol.In(["", *COIL_DRY_MODES]),
-                    vol.Optional("coil_dry_fan_mode", default=""): str,
-                    vol.Optional("valve_opening_entity"): _number_entity_or_empty,
-                    vol.Optional("valve_closing_entity"): _number_entity_or_empty,
-                    # No default: devices without it keep their stored form (#482)
-                    vol.Optional("valve_closing_mode"): vol.In(VALVE_CLOSING_MODES),
-                },
-                _validate_device_idle_action,
-                _validate_device_coil_dry,
-                _validate_device_valve,
-            )
-        ],
-        vol.Optional("temperature_sensor"): str,
-        vol.Optional("humidity_sensor"): str,
-        vol.Optional("occupancy_sensors"): [str],
-        vol.Optional("occupancy_eco_enabled"): bool,
-        vol.Optional("occupancy_eco_delay"): vol.All(
-            vol.Coerce(int), vol.Range(min=MIN_OCCUPANCY_ECO_DELAY_MINUTES, max=240)
-        ),
-        vol.Optional("preheat_enabled"): bool,
-        vol.Optional("climate_mode"): vol.In(CLIMATE_MODES),
-        vol.Optional("schedules"): [{vol.Required("entity_id"): str}],
-        vol.Optional("schedule_selector_entity"): str,
-        vol.Optional("window_sensors"): [str],
-        vol.Optional("window_open_delay"): vol.Coerce(int),
-        vol.Optional("window_close_delay"): vol.Coerce(int),
-        vol.Optional("comfort_temp"): vol.Coerce(float),
-        vol.Optional("eco_temp"): vol.Coerce(float),
-        vol.Optional("comfort_heat"): vol.Coerce(float),
-        vol.Optional("comfort_cool"): vol.Coerce(float),
-        vol.Optional("eco_heat"): vol.Coerce(float),
-        vol.Optional("eco_cool"): vol.Coerce(float),
-        vol.Optional("presence_persons"): [str],
-        vol.Optional("display_name"): str,
-        vol.Optional("heating_system_type"): vol.In(["", "radiator", "underfloor"]),
-        vol.Optional("covers"): [str],
-        vol.Optional("covers_auto_enabled"): bool,
-        vol.Optional("covers_deploy_threshold"): vol.All(vol.Coerce(float), vol.Range(min=0)),
-        vol.Optional("covers_min_position"): vol.All(vol.Coerce(int), vol.Range(min=0, max=99)),
-        vol.Optional("covers_outdoor_min_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=35))),
-        vol.Optional("covers_override_minutes"): vol.All(vol.Coerce(int), vol.Range(min=0, max=480)),
-        vol.Optional("cover_schedules"): [
+# Named so tests can validate panel-shaped payloads against the *production*
+# schema (the wrapped-handler tests bypass the decorator's validation, which
+# is exactly how the definition-id regression slipped through).
+ROOM_SAVE_SCHEMA = {
+    vol.Required("type"): "roommind/rooms/save",
+    vol.Required("area_id"): str,
+    vol.Optional("thermostats"): [str],
+    vol.Optional("acs"): [str],
+    vol.Optional("devices"): [
+        vol.All(
             {
                 vol.Required("entity_id"): str,
-                vol.Optional("mode", default="force"): vol.In(["force", "gate"]),
-            }
-        ],
-        vol.Optional("cover_schedule_selector_entity"): str,
-        vol.Optional("cover_orientations"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=359))},
-        vol.Optional("covers_night_close"): bool,
-        vol.Optional("covers_night_close_elevation"): vol.All(vol.Coerce(float), vol.Range(min=-18, max=10)),
-        vol.Optional("covers_night_close_offset_minutes"): vol.All(vol.Coerce(int), vol.Range(min=-120, max=120)),
-        vol.Optional("covers_night_position"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
-        vol.Optional("covers_snap_deploy"): bool,
-        vol.Optional("covers_window_hold"): bool,
-        vol.Optional("cover_min_positions"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=99))},
-        vol.Optional("ignore_presence"): bool,
-        vol.Optional("is_outdoor"): bool,
-        vol.Optional("valve_protection_exclude"): [str],
-        vol.Optional("heat_source_orchestration"): bool,
-        vol.Optional("heat_source_primary_delta"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=5.0)),
-        vol.Optional("heat_source_outdoor_threshold"): vol.All(vol.Coerce(float), vol.Range(min=-20, max=25)),
-        vol.Optional("heat_source_ac_min_outdoor"): vol.All(vol.Coerce(float), vol.Range(min=-30, max=5)),
-        vol.Optional("climate_control_enabled"): bool,
-        vol.Optional("tou_mode"): vol.In(TOU_MODES),
-        vol.Optional("tou_max_boost"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
-        vol.Optional("tou_boost_unoccupied"): bool,
-        vol.Optional("schedule_blocks"): [
-            {
-                vol.Required("id"): str,
-                vol.Required("name"): str,
-                vol.Optional("enabled", default=True): bool,
-                vol.Required("when"): {
-                    vol.Required("start"): str,
-                    vol.Required("end"): str,
-                    vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
-                },
-                vol.Optional("gate", default="always"): vol.In(TOU_BLOCK_GATES),
-                vol.Optional("side", default="both"): vol.In(TOU_BLOCK_SIDES),
-                vol.Required("value"): {
-                    vol.Required("mode"): vol.In(TOU_BLOCK_VALUE_MODES),
-                    vol.Optional("temp"): vol.Coerce(float),
-                    vol.Optional("direction"): vol.In(TOU_SHIFT_DIRECTIONS),
-                    vol.Optional("delta"): vol.Coerce(float),
-                },
-            }
-        ],
-        vol.Optional("tou_schedule_enabled"): bool,
-        # Tariff schedule rows edited on the device card: thin references into
-        # the shared rule library (settings["tou_rules"]) with a per-row
-        # enabled toggle. `definition` rides along only while the card creates
-        # or edits the rule; _async_upsert_tou_rules applies it (propagate /
-        # fork on rename / merge onto a same-named rule) and it is never
-        # stored on the room. Rows in the ignored pre-release inline format
-        # (no rule_id) are dropped by the next save.
-        vol.Optional("tou_overrides"): [
-            {
-                vol.Required("id"): str,
-                vol.Required("rule_id"): str,
-                vol.Optional("enabled", default=True): bool,
-                vol.Optional("definition"): _TOU_RULE_DEF_FIELDS,
-            }
-        ],
-    }
-)
+                vol.Required("type"): vol.In(["trv", "ac"]),
+                vol.Optional("role", default="auto"): vol.In(["primary", "secondary", "auto"]),
+                vol.Optional("heating_system_type", default=""): vol.In(["", "radiator", "underfloor"]),
+                vol.Optional("idle_action", default="off"): vol.In(["off", "fan_only", "setback", "low"]),
+                vol.Optional("idle_fan_mode", default="low"): str,
+                # No default: devices without it keep their stored form (#255)
+                vol.Optional("setback_auto_off"): bool,
+                vol.Optional("setpoint_mode", default="proportional"): vol.In(["proportional", "direct"]),
+                vol.Optional("setpoint_offset", default=0.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=SETPOINT_OFFSET_MIN, max=SETPOINT_OFFSET_MAX)
+                ),
+                vol.Optional("coil_dry", default=COIL_DRY_INHERIT): vol.In(COIL_DRY_OVERRIDES),
+                vol.Optional("coil_dry_minutes", default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
+                vol.Optional("coil_dry_mode", default=""): vol.In(["", *COIL_DRY_MODES]),
+                vol.Optional("coil_dry_fan_mode", default=""): str,
+                vol.Optional("valve_opening_entity"): _number_entity_or_empty,
+                vol.Optional("valve_closing_entity"): _number_entity_or_empty,
+                # No default: devices without it keep their stored form (#482)
+                vol.Optional("valve_closing_mode"): vol.In(VALVE_CLOSING_MODES),
+            },
+            _validate_device_idle_action,
+            _validate_device_coil_dry,
+            _validate_device_valve,
+        )
+    ],
+    vol.Optional("temperature_sensor"): str,
+    vol.Optional("humidity_sensor"): str,
+    vol.Optional("occupancy_sensors"): [str],
+    vol.Optional("occupancy_eco_enabled"): bool,
+    vol.Optional("occupancy_eco_delay"): vol.All(
+        vol.Coerce(int), vol.Range(min=MIN_OCCUPANCY_ECO_DELAY_MINUTES, max=240)
+    ),
+    vol.Optional("preheat_enabled"): bool,
+    vol.Optional("climate_mode"): vol.In(CLIMATE_MODES),
+    vol.Optional("schedules"): [{vol.Required("entity_id"): str}],
+    vol.Optional("schedule_selector_entity"): str,
+    vol.Optional("window_sensors"): [str],
+    vol.Optional("window_open_delay"): vol.Coerce(int),
+    vol.Optional("window_close_delay"): vol.Coerce(int),
+    vol.Optional("comfort_temp"): vol.Coerce(float),
+    vol.Optional("eco_temp"): vol.Coerce(float),
+    vol.Optional("comfort_heat"): vol.Coerce(float),
+    vol.Optional("comfort_cool"): vol.Coerce(float),
+    vol.Optional("eco_heat"): vol.Coerce(float),
+    vol.Optional("eco_cool"): vol.Coerce(float),
+    vol.Optional("presence_persons"): [str],
+    vol.Optional("display_name"): str,
+    vol.Optional("heating_system_type"): vol.In(["", "radiator", "underfloor"]),
+    vol.Optional("covers"): [str],
+    vol.Optional("covers_auto_enabled"): bool,
+    vol.Optional("covers_deploy_threshold"): vol.All(vol.Coerce(float), vol.Range(min=0)),
+    vol.Optional("covers_min_position"): vol.All(vol.Coerce(int), vol.Range(min=0, max=99)),
+    vol.Optional("covers_outdoor_min_temp"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=35))),
+    vol.Optional("covers_override_minutes"): vol.All(vol.Coerce(int), vol.Range(min=0, max=480)),
+    vol.Optional("cover_schedules"): [
+        {
+            vol.Required("entity_id"): str,
+            vol.Optional("mode", default="force"): vol.In(["force", "gate"]),
+        }
+    ],
+    vol.Optional("cover_schedule_selector_entity"): str,
+    vol.Optional("cover_orientations"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=359))},
+    vol.Optional("covers_night_close"): bool,
+    vol.Optional("covers_night_close_elevation"): vol.All(vol.Coerce(float), vol.Range(min=-18, max=10)),
+    vol.Optional("covers_night_close_offset_minutes"): vol.All(vol.Coerce(int), vol.Range(min=-120, max=120)),
+    vol.Optional("covers_night_position"): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+    vol.Optional("covers_snap_deploy"): bool,
+    vol.Optional("covers_window_hold"): bool,
+    vol.Optional("cover_min_positions"): {str: vol.All(vol.Coerce(int), vol.Range(min=0, max=99))},
+    vol.Optional("ignore_presence"): bool,
+    vol.Optional("is_outdoor"): bool,
+    vol.Optional("valve_protection_exclude"): [str],
+    vol.Optional("heat_source_orchestration"): bool,
+    vol.Optional("heat_source_primary_delta"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=5.0)),
+    vol.Optional("heat_source_outdoor_threshold"): vol.All(vol.Coerce(float), vol.Range(min=-20, max=25)),
+    vol.Optional("heat_source_ac_min_outdoor"): vol.All(vol.Coerce(float), vol.Range(min=-30, max=5)),
+    vol.Optional("climate_control_enabled"): bool,
+    vol.Optional("tou_mode"): vol.In(TOU_MODES),
+    vol.Optional("tou_max_boost"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=35))),
+    vol.Optional("tou_boost_unoccupied"): bool,
+    vol.Optional("schedule_blocks"): [
+        {
+            vol.Required("id"): str,
+            vol.Required("name"): str,
+            vol.Optional("enabled", default=True): bool,
+            vol.Required("when"): {
+                vol.Required("start"): str,
+                vol.Required("end"): str,
+                vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
+            },
+            vol.Optional("gate", default="always"): vol.In(TOU_BLOCK_GATES),
+            vol.Optional("side", default="both"): vol.In(TOU_BLOCK_SIDES),
+            vol.Required("value"): {
+                vol.Required("mode"): vol.In(TOU_BLOCK_VALUE_MODES),
+                vol.Optional("temp"): vol.Coerce(float),
+                vol.Optional("direction"): vol.In(TOU_SHIFT_DIRECTIONS),
+                vol.Optional("delta"): vol.Coerce(float),
+            },
+        }
+    ],
+    vol.Optional("tou_schedule_enabled"): bool,
+    # Tariff schedule rows edited on the device card: thin references into
+    # the shared rule library (settings["tou_rules"]) with a per-row
+    # enabled toggle. `definition` rides along only while the card creates
+    # or edits the rule; _async_upsert_tou_rules applies it (propagate /
+    # fork on rename / merge onto a same-named rule) and it is never
+    # stored on the room. The optional `id` is tolerated because the card
+    # echoes the library entry's id while editing (upsert strips it).
+    # Rows in the ignored pre-release inline format (no rule_id) are
+    # dropped by the next save.
+    vol.Optional("tou_overrides"): [
+        {
+            vol.Required("id"): str,
+            vol.Required("rule_id"): str,
+            vol.Optional("enabled", default=True): bool,
+            vol.Optional("definition"): {
+                **_TOU_RULE_DEF_FIELDS,
+                vol.Optional("id"): str,
+            },
+        }
+    ],
+}
+
+
+@websocket_api.websocket_command(ROOM_SAVE_SCHEMA)
 @websocket_api.async_response
 async def websocket_save_room(
     hass: HomeAssistant,

@@ -10,6 +10,7 @@ import pytest
 
 from custom_components.roommind.const import DOMAIN
 from custom_components.roommind.websocket_api import (
+    ROOM_SAVE_SCHEMA,
     _csv_to_points,
     _safe_float,
     websocket_covers_clear_override,
@@ -3651,6 +3652,61 @@ async def test_save_room_tou_override_validation(ws_hass, store, connection):
     ]
     await _save_room(ws_hass, connection, msg(74, dup))
     assert connection.send_error.call_args[0][1] == "duplicate_tou_override_id"
+
+
+def test_room_save_schema_accepts_panel_shaped_rows():
+    """The *production* schema (not the wrapped handler) must accept what the panel sends.
+
+    The card builds a `definition` by spreading the library entry, which
+    carries its `id`. Voluptuous rejects unknown keys by default, so before
+    the schema tolerated `id` every definition-bearing save failed with an
+    opaque "failed to save configuration". Wrapped-handler tests skip the
+    decorator's validation — this test runs the real schema.
+    """
+    import voluptuous as vol
+    from homeassistant.components.websocket_api.messages import BASE_COMMAND_MESSAGE_SCHEMA
+
+    # Exactly how @websocket_command wires it up (decorators.py:
+    # BASE_COMMAND_MESSAGE_SCHEMA.extend(schema)) — plain vol.Schema would
+    # reject the envelope's required "id"/"type" keys and mask the point.
+    schema = BASE_COMMAND_MESSAGE_SCHEMA.extend(ROOM_SAVE_SCHEMA)
+    msg = {
+        "id": 1,
+        "type": "roommind/rooms/save",
+        "area_id": "living_room_abc12345",
+        "thermostats": ["climate.living_room"],
+        "tou_schedule_enabled": True,
+        "tou_overrides": [
+            {
+                "id": "row1",
+                "rule_id": "rl1",
+                "enabled": True,
+                "definition": {
+                    "id": "rl1",  # the card echo that used to be rejected
+                    "name": "peak relax",
+                    "tier": "peak",
+                    "edge": "start",
+                    "action": "set",
+                    "heat": 18.0,
+                    "cool": None,
+                    "until": "minutes",
+                    "minutes": 120,
+                    "clock": "",
+                    "days": ["monday"],
+                    "between": None,
+                },
+            },
+            {"id": "row2", "rule_id": "rl2", "enabled": True},  # pure reference
+        ],
+    }
+    validated = schema(msg)
+    assert validated["tou_overrides"][0]["definition"]["id"] == "rl1"
+
+    # Truly unknown keys inside a definition must still be rejected.
+    bad = {**msg, "tou_overrides": [{**msg["tou_overrides"][0], "definition": {
+        **msg["tou_overrides"][0]["definition"], "nonsense": 1}}]}
+    with pytest.raises(vol.Invalid):
+        schema(bad)
 
 
 @pytest.mark.asyncio

@@ -151,6 +151,10 @@ export interface TouRule {
   between?: { from: string; to: string } | null;
 }
 
+/** The rule's fields without its library id — what a card `definition`
+ * carries while creating/editing (the server strips/owns ids). */
+export type TouRuleDef = Omit<TouRule, "id">;
+
 /** One row on the device card: a thin reference into the shared library.
  * `definition` rides along only while the card creates or edits the rule
  * (the server upserts it into the library and strips it from the room). */
@@ -158,7 +162,7 @@ export interface TouOverrideRow {
   id: string;
   rule_id: string;
   enabled: boolean;
-  definition?: TouRule;
+  definition?: TouRuleDef;
 }
 
 export interface TouCalendarBinding {

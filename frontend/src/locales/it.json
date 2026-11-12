@@ -711,6 +711,7 @@
   "tou.override_enabled": "Riga attiva",
   "tou.override_minutes": "Minuti",
   "tou.override_name": "Nome",
+  "tou.override_name_hint": "Scegli un nome esistente per collegare la riga a quella regola condivisa; scrivi un nome nuovo per rinominarla (un nome nuovo crea una copia per questa stanza).",
   "tou.override_side.cool": "Raffrescamento",
   "tou.override_side.heat": "Riscaldamento",
   "tou.override_sides_hint": "Lasciare un campo vuoto salta la riga in quella modalità: una riga solo riscaldamento non tocca mai il raffrescamento.",

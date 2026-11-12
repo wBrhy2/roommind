@@ -204,10 +204,14 @@ the same rule:
 
 - **Editing a rule** from any card updates the single shared definition — the
   card shows "used in N rooms" so the blast radius is visible before you type.
-- **Renaming to a fresh name** forks a derivative: this room gets its own copy
-  and the other rooms keep the original.
-- **Renaming onto an existing rule's name** merges: the definition you just
-  edited wins and every room referencing either name now shares one rule.
+- **The name field doubles as the rule picker**: picking an existing rule's
+  name switches the row onto that shared rule (its configuration loads into
+  the editor, the library stays untouched); typing a fresh name renames, and
+  a rename to a name nobody uses forks a derivative — this room keeps the
+  edited rule, the others keep the original. (The server's merge rule stays
+  as the API-level invariant: a definition saved under a name that already
+  belongs to another rule overwrites it and repoints every reference; the
+  card avoids that case by adopting instead.)
 - **The row toggle** (enabled) stays per-room — one room can park a shared
   rule without switching it off in the others.
 
