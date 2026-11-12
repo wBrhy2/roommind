@@ -731,6 +731,8 @@
   "tou.pick_rule": "Zeile hinzufügen",
   "tou.pick_rule_hint": "Kopieren nutzt eine bestehende gemeinsame Regel (eine Änderung wirkt in allen Räumen mit dieser Regel); eine neue Regel gehört diesem Raum, bis ein anderer Raum sie verwendet.",
   "tou.rename_hint": "Umbenennen erstellt eine Kopie für diesen Raum – außer der Name entspricht einer bestehenden Regel, dann werden beide zu einer gemeinsamen Regel.",
+  "tou.save_button": "Speichern",
+  "tou.save_stage_hint": "Änderungen sind vorgemerkt — sie wirken, wenn du die Zeile einklappst.",
   "tou.rule_missing": "Die Regel dieser Zeile existiert nicht mehr – Zeile entfernen oder Regel neu anlegen.",
   "tou.rule_used_in": "In {count} Räumen verwendet – Änderungen gelten für alle.",
   "tou.schedule_empty": "Noch keine Zeilen. Unten eine hinzufügen.",

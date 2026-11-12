@@ -213,7 +213,11 @@ rooms keep thin references `{row, rule_id, enabled}`. Same name always means
 the same rule:
 
 - **Editing a rule** from any card updates the single shared definition — the
-  card shows "used in N rooms" so the blast radius is visible before you type.
+  card shows "used in N rooms" so the blast radius is visible before you
+  type. Edits are *staged* on the card and reach the server as one save
+  (collapse the row, tap Save, or close the dialog), so the save is atomic:
+  the name travels with the fields, and editing and *then* renaming forks a
+  derivative instead of clobbering the shared rule.
 - **The name field doubles as the rule picker**: picking an existing rule's
   name switches the row onto that shared rule (its configuration loads into
   the editor, the library stays untouched); typing a fresh name renames, and

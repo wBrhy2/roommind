@@ -731,6 +731,8 @@
   "tou.pick_rule": "Ajouter une ligne",
   "tou.pick_rule_hint": "Copier réutilise une règle partagée existante (une modification s'applique à toutes les pièces qui l'utilisent) ; une nouvelle règle appartient à cette pièce tant qu'aucune autre ne la référence.",
   "tou.rename_hint": "Renommer crée une copie pour cette pièce — sauf si le nom correspond à une règle existante : les deux ne font alors qu'une seule règle partagée.",
+  "tou.save_button": "Enregistrer",
+  "tou.save_stage_hint": "Modifications en attente — elles s'appliquent en repliant cette ligne.",
   "tou.rule_missing": "La règle de cette ligne n'existe plus — retirez la ligne ou recréez la règle.",
   "tou.rule_used_in": "Utilisée dans {count} pièces — les modifications s'appliquent à toutes.",
   "tou.schedule_empty": "Aucune ligne. Ajoutez-en une ci-dessous.",

@@ -731,6 +731,8 @@
   "tou.pick_rule": "Aggiungi una riga",
   "tou.pick_rule_hint": "Copiare riutilizza una regola condivisa esistente (una modifica si applica a tutte le stanze che la usano); una nuova regola appartiene a questa stanza finché un'altra non la richiama.",
   "tou.rename_hint": "Rinominare crea una copia per questa stanza, a meno che il nome corrisponda a una regola esistente: in quel caso le due diventano una sola regola condivisa.",
+  "tou.save_button": "Salva",
+  "tou.save_stage_hint": "Modifiche in sospese — si applicano richiudendo la riga.",
   "tou.rule_missing": "La regola di questa riga non esiste più: rimuovi la riga o aggiungi di nuovo la regola.",
   "tou.rule_used_in": "Usata in {count} stanze: le modifiche valgono per tutte.",
   "tou.schedule_empty": "Ancora nessuna riga. Aggiungine una qui sotto.",

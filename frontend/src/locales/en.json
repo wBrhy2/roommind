@@ -731,6 +731,8 @@
   "tou.pick_rule": "Add a row",
   "tou.pick_rule_hint": "Copying reuses an existing shared rule (an edit propagates to every room using it); a new rule belongs to this room until another references it.",
   "tou.rename_hint": "Renaming forks a copy for this room — unless the name matches an existing rule, then both become one shared rule.",
+  "tou.save_button": "Save",
+  "tou.save_stage_hint": "Changes are staged — they apply when you collapse this row.",
   "tou.rule_missing": "This row's rule no longer exists — remove the row or add the rule again.",
   "tou.rule_used_in": "Used in {count} rooms — changes apply to all of them.",
   "tou.schedule_empty": "No rows yet. Add one below.",

@@ -3774,6 +3774,22 @@ async def test_save_room_tou_rule_propagate_fork_merge(ws_hass, store, connectio
     assert store.get_room("living_room_abc12345")["tou_overrides"][0]["rule_id"] == "rule-relax"
     assert store.get_room("living_room")["tou_overrides"][0]["rule_id"] == "rule-relax"
 
+    # The staged-save guarantee: field edits AND a rename in one save fork a
+    # derivative — the shared rule keeps its current definition. (This is
+    # the edit-then-rename order that used to clobber the original.)
+    await _save_room(ws_hass, connection, save(85, "living_room_abc12345", [
+        {"id": "rowA", "rule_id": "rule-relax", "enabled": True,
+         "definition": {**edited, "name": "solo fork", "heat": 16.0}}
+    ]))
+    library = store.get_settings()["tou_rules"]
+    assert len(library) == 2
+    relax = next(r for r in library if r["id"] == "rule-relax")
+    assert relax["heat"] == 19.0
+    solo = next(r for r in library if r["name"] == "solo fork")
+    assert solo["heat"] == 16.0
+    assert store.get_room("living_room_abc12345")["tou_overrides"][0]["rule_id"] == solo["id"]
+    assert store.get_room("living_room")["tou_overrides"][0]["rule_id"] == "rule-relax"
+
 
 @pytest.mark.asyncio
 async def test_save_room_tou_rules_prune_on_last_reference(ws_hass, store, connection):

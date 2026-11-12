@@ -395,6 +395,11 @@ export class RsRoomDetail extends LitElement {
   };
 
   private _closeEdit = () => {
+    // Flush staged tariff-rule edits while the section is still connected —
+    // a disconnected element's events never reach this parent.
+    (
+      this.shadowRoot?.querySelector("rs-tou-section") as { flushPending?: () => void } | undefined
+    )?.flushPending?.();
     this._editing = null;
   };
 
