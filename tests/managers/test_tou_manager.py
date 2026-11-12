@@ -104,6 +104,61 @@ def test_normalize_period_state(raw: str, tier: str) -> None:
     assert normalize_period_state(raw) == tier
 
 
+def test_period_aliases_override_word_recognition() -> None:
+    """A user alias outranks the built-in vocabulary; unaliased strings (and
+    aliases to a tier RoomMind does not know) keep the built-in answer."""
+    settings = {"tou_period_aliases": {"partially_peak": "ultra_low", "bogus_target": "nope"}}
+    assert TouManager._normalize_period("Partially_Peak", settings) == TOU_TIER_ULTRA_LOW
+    assert TouManager._normalize_period("ulo_on_peak", settings) == TOU_TIER_PEAK
+    # "bogus_target" is not a real string from any source; an alias whose
+    # value is not a tier must be ignored: "peak" alone still maps normally.
+    assert TouManager._normalize_period("peak", settings) == TOU_TIER_PEAK
+    assert TouManager._normalize_period("partially_peak", {}) == TOU_TIER_PEAK
+
+
+@pytest.mark.asyncio
+async def test_tier_info_observes_names_rates_and_unmapped() -> None:
+    """The dictionary block reads live: mapped names with the rate seen in
+    that tier, plus strings the normalizer could not place."""
+    hass = _make_hass({"sensor.period": "ulo_on_peak", "sensor.rate": "0.337"})
+    mgr = TouManager(hass)
+    settings = {"tou_enabled": True, "tou_period_entity": "sensor.period", "tou_rate_entity": "sensor.rate"}
+    assert await mgr.async_build_timeline(settings) is not None
+    info = mgr.tier_info(settings)
+    peak = info["tiers"][TOU_TIER_PEAK]
+    assert peak["current"] is True
+    assert peak["rate"] == 0.337 and peak["kind"] == "observed"
+    assert "ulo_on_peak" in peak["names"]
+    assert info["tiers"][TOU_TIER_OFF]["rate"] is None
+    assert info["unmapped"] == []
+
+    # A provider wording the normalizer cannot read lands in unmapped.
+    weird = _make_hass({"sensor.period": "tax block a"})
+    mgr2 = TouManager(weird)
+    settings2 = {"tou_enabled": True, "tou_period_entity": "sensor.period"}
+    assert await mgr2.async_build_timeline(settings2) is not None
+    info2 = mgr2.tier_info(settings2)
+    assert {"state": "tax block a", "count": 1} in info2["unmapped"]
+
+
+def test_tier_info_falls_back_to_windows_and_cutoffs() -> None:
+    """No observations (fresh start): manual-window rates first, then cost
+    thresholds marked as cutoffs so the UI can say "from"."""
+    mgr = TouManager(_make_hass({}))
+    settings = {
+        "tou_peak_threshold": 0.3,
+        "tou_mid_threshold": 0.15,
+        "tou_ultra_threshold": 0.02,
+        "tou_rate_windows": [{"id": "w", "rate": 0.42, "start": "17:00", "end": "21:00"}],
+    }
+    info = mgr.tier_info(settings)
+    assert info["tiers"][TOU_TIER_PEAK]["rate"] == 0.42
+    assert info["tiers"][TOU_TIER_PEAK]["kind"] == "window"
+    assert info["tiers"][TOU_TIER_MID]["rate"] == 0.15
+    assert info["tiers"][TOU_TIER_MID]["kind"] == "cutoff"
+    assert info["tiers"][TOU_TIER_OFF]["rate"] is None  # between: no number to show
+
+
 # ---------------------------------------------------------------------------
 # Timeline building from sources
 # ---------------------------------------------------------------------------

@@ -29,6 +29,8 @@ import type {
   TouLookahead,
   TouRateWindow,
   TouTier,
+  TouTierInfo,
+  TouTierInfoTier,
   TouTierSource,
 } from "../../types";
 import { localize, type TranslationKey } from "../../utils/localize";
@@ -82,6 +84,10 @@ export class RsSettingsTou extends LitElement {
   @property({ type: Number }) public touCoolMax = 30;
   @property({ type: Number }) public touSwing = 3;
   @property({ type: Number }) public touStoreGap = 1;
+  /** Tier dictionary (prices + vocabulary) observed from the live sources. */
+  @property({ attribute: false }) public touTierInfo: TouTierInfo | null = null;
+  /** User-assigned period vocabulary: raw lower-cased state -> tier. */
+  @property({ attribute: false }) public touPeriodAliases: Record<string, string> = {};
 
   @state() private _fineTuneOpen = false;
 
@@ -112,6 +118,55 @@ export class RsSettingsTou extends LitElement {
       }
       .shaping-grid {
         margin-top: 8px;
+      }
+      .dic-rows {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin: 8px 0;
+      }
+      .dic-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        font-size: 13px;
+      }
+      .dic-tier {
+        font-weight: 500;
+        min-width: 150px;
+      }
+      .dic-price {
+        color: var(--secondary-text-color);
+        min-width: 90px;
+      }
+      .dic-count {
+        color: var(--secondary-text-color);
+        font-size: 11px;
+      }
+      .dic-now {
+        font-size: 11px;
+        color: var(--success-color, #43a047);
+        border: 1px solid currentColor;
+        border-radius: 8px;
+        padding: 0 6px;
+        margin-left: 4px;
+      }
+      .dic-unmapped-title {
+        font-weight: 500;
+        margin-top: 10px;
+      }
+      .vocab-chip {
+        font-family: var(--code-font-family, monospace);
+        font-size: 12px;
+        background: var(--card-background-color, #fff);
+        border: 1px solid var(--divider-color, #e0e0e0);
+        border-radius: 6px;
+        padding: 1px 6px;
+      }
+      .vocab-chip.alias {
+        cursor: pointer;
+        border-color: var(--primary-color, #0389ff);
       }
       .col-header {
         font-size: 12px;
@@ -489,6 +544,7 @@ export class RsSettingsTou extends LitElement {
                   ? html` <div class="hint">${localize("tou.card_schedule_hint", l)}</div> `
                   : nothing
               }
+              ${this._renderTierDictionary(l)}
 
               <div class="fine-tune-row" @click=${() => (this._fineTuneOpen = !this._fineTuneOpen)}>
                 <ha-icon
@@ -792,6 +848,99 @@ export class RsSettingsTou extends LitElement {
           )}
       ></ha-icon-button>
     </div>`;
+  }
+
+  // ---- Tier dictionary: what the bound sources actually feed ----
+
+  private _rateText(info: TouTierInfoTier | undefined, unit: string, l: string): string {
+    if (!info || info.rate == null || info.kind == null) return localize("tou.dic_no_price", l);
+    const n = new Intl.NumberFormat(this.hass.language, { maximumFractionDigits: 4 }).format(
+      info.rate,
+    );
+    const prefix = info.kind === "cutoff" ? "≥ " : "";
+    return `${prefix}${n}${unit ? ` ${unit}` : ""}`;
+  }
+
+  private _assignAlias(state: string, tier: string) {
+    const next = { ...this.touPeriodAliases };
+    if (tier === "") delete next[state];
+    else next[state] = tier;
+    this._fire("touPeriodAliases", next);
+  }
+
+  private _renderTierDictionary(l: string) {
+    const info = this.touTierInfo;
+    if (info === null) {
+      return html`
+        <div class="section-label">${localize("tou.dic_title", l)}</div>
+        <div class="hint">${localize("tou.dic_hint", l)}</div>
+        <div class="hint">${localize("tou.dic_not_running", l)}</div>
+      `;
+    }
+    return html`
+      <div class="section-label">${localize("tou.dic_title", l)}</div>
+      <div class="hint">${localize("tou.dic_hint", l)}</div>
+      <div class="dic-rows">${TOU_TIERS.map((t) => this._renderDicRow(t, info, l))}</div>
+      ${(info.unmapped ?? []).length > 0 ? this._renderUnmapped(info, l) : nothing}
+      <div class="hint">${localize("tou.dic_cutoff_hint", l)}</div>
+    `;
+  }
+
+  private _renderDicRow(t: TouTier, info: TouTierInfo, l: string) {
+    const ti = info.tiers[t];
+    const now = ti?.current
+      ? html`<span class="dic-now">${localize("tou.dic_now", l)}</span>`
+      : nothing;
+    const chips = (ti?.names ?? []).map((n) => this._renderVocabChip(n, l));
+    return html`
+      <div class="dic-row">
+        <span class="dic-tier">${localize(`tou.tier.${t}`, l)}${now}</span>
+        <span class="dic-price">${this._rateText(ti, info.unit, l)}</span>
+        <span>${chips}</span>
+      </div>
+    `;
+  }
+
+  /** A period name that resolved to this tier; user-assigned ones carry the
+   * vocabulary and can be un-assigned with a click. */
+  private _renderVocabChip(name: string, l: string) {
+    if (!this.touPeriodAliases[name]) {
+      return html`<span class="vocab-chip">${name}</span>`;
+    }
+    return html`<span
+      class="vocab-chip alias"
+      title=${localize("tou.dic_remove_alias", l)}
+      @click=${() => this._assignAlias(name, "")}
+      >${name} ×</span
+    >`;
+  }
+
+  private _renderUnmapped(info: TouTierInfo, l: string) {
+    return html`
+      <div class="dic-unmapped-title">${localize("tou.dic_unmapped_title", l)}</div>
+      <div class="hint">${localize("tou.dic_unmapped_hint", l)}</div>
+      <div class="dic-rows">${info.unmapped.map((u) => this._renderUnmappedRow(u, l))}</div>
+    `;
+  }
+
+  private _renderUnmappedRow(u: { state: string; count: number }, l: string) {
+    return html`
+      <div class="dic-row">
+        <span class="vocab-chip">${u.state}</span>
+        <span class="dic-count">×${u.count}</span>
+        <ha-select
+          .label=${localize("tou.dic_assign", l)}
+          .value=${this.touPeriodAliases[u.state] ?? ""}
+          .options=${TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) }))}
+          @selected=${(e: Event) => {
+            const v = getSelectValue(e);
+            if (v) this._assignAlias(u.state, v);
+          }}
+          @closed=${(e: Event) => e.stopPropagation()}
+          fixedMenuPosition
+        ></ha-select>
+      </div>
+    `;
   }
 
   private _fire(key: string, value: unknown) {

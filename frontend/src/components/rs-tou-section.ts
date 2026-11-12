@@ -31,6 +31,7 @@ import type {
   TouRule,
   TouRuleDef,
   TouTier,
+  TouTierInfo,
 } from "../types";
 import { localize } from "../utils/localize";
 import { getSelectValue } from "../utils/events";
@@ -111,6 +112,8 @@ export class RsTouSection extends LitElement {
   };
   /** This room's overrides of the global limits (blank = inherit). */
   @property({ attribute: false }) public roomLimits: TouRoomLimits = {};
+  /** Tier prices the bound sources feed, appended to tier dropdown labels. */
+  @property({ attribute: false }) public tierInfo: TouTierInfo | null = null;
   /** The tariff-schedule section gate (room config). */
   @property({ type: Boolean }) public scheduleEnabled = false;
   /** This room's schedule rows: references into the shared library. */
@@ -164,6 +167,19 @@ export class RsTouSection extends LitElement {
     if (this._pending[row.id]) return this._pending[row.id];
     if (this._isDraft(row.id)) return row.definition ?? null;
     return null;
+  }
+
+  /** Tier label with the known price: the stable descriptor (times are not). */
+  private _tierLabel(tier: TouTier, l: string): string {
+    const base = localize(`tou.tier.${tier}`, l);
+    const info = this.tierInfo?.tiers[tier];
+    if (!info || info.rate == null || info.kind == null) return base;
+    const n = new Intl.NumberFormat(this.hass.language, { maximumFractionDigits: 4 }).format(
+      info.rate,
+    );
+    const prefix = info.kind === "cutoff" ? "≥ " : "";
+    const unit = this.tierInfo?.unit ? ` ${this.tierInfo.unit}` : "";
+    return `${base} · ${prefix}${n}${unit}`;
   }
 
   private static _nameMissing(def: TouRuleDef | null): boolean {
@@ -643,7 +659,7 @@ export class RsTouSection extends LitElement {
                     .value=${rule.tier}
                     .options=${[
                       { value: TIER_ANY, label: localize("tou.tier_any", l) },
-                      ...TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) })),
+                      ...TOU_TIERS.map((t) => ({ value: t, label: this._tierLabel(t, l) })),
                     ]}
                     @selected=${(e: Event) => {
                       const v = getSelectValue(e);
@@ -884,7 +900,7 @@ export class RsTouSection extends LitElement {
         <ha-select
           .label=${localize(time ? "tou.charge_during" : "tou.coast_through", l)}
           .value=${rule.tier === TIER_ANY ? "" : rule.tier}
-          .options=${TOU_TIERS.map((t) => ({ value: t, label: localize(`tou.tier.${t}`, l) }))}
+          .options=${TOU_TIERS.map((t) => ({ value: t, label: this._tierLabel(t, l) }))}
           @selected=${(e: Event) => {
             const v = getSelectValue(e);
             if (v !== null) update({ tier: v as TouTier });

@@ -107,6 +107,7 @@ async def test_list_rooms_empty(ws_hass, store, connection):
                 "swing": 3.0,
                 "store_gap": 1.0,
             },
+            "tou_tier_info": None,
         },
     )
 
@@ -4018,6 +4019,25 @@ async def test_save_settings_tou_rules_direct(ws_hass, store, connection):
     bad = {"id": "g3", "name": "nonsense", "tier": "peak", "edge": "start", "action": "sundial", "heat": 18.0}
     await _save_settings(ws_hass, connection, {"id": 92, "type": "roommind/settings/save", "tou_rules": [bad]})
     assert connection.send_error.call_args[0][1] == "invalid_tou_rule"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_period_aliases(ws_hass, store, connection):
+    """User-assigned period vocabulary persists through the settings save."""
+    await store.async_load()
+    await _save_settings(
+        ws_hass,
+        connection,
+        {
+            "id": 95,
+            "type": "roommind/settings/save",
+            "tou_period_aliases": {"partially_peak": "peak", "evening surge": "ultra_low"},
+        },
+    )
+    connection.send_result.assert_called_once()
+    saved = connection.send_result.call_args[0][1]["settings"]
+    assert saved["tou_period_aliases"] == {"partially_peak": "peak", "evening surge": "ultra_low"}
+    assert store.get_settings()["tou_period_aliases"]["partially_peak"] == "peak"
 
 
 @pytest.mark.asyncio

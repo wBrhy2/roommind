@@ -7,6 +7,7 @@ import type {
   RoomWithoutArea,
   TouLimits,
   TouRule,
+  TouTierInfo,
 } from "./types";
 
 import { getEntitiesForArea } from "./utils/room-state";
@@ -68,6 +69,8 @@ export class RoomMindPanel extends LitElement {
   /** Shared tariff rule library (settings.tou_rules) for the device cards. */
   @state() private _touRules: TouRule[] = [];
   /** Global store limits for the room cards' store notes. */
+  /** Tier dictionary (prices + vocabulary the sources feed) for the settings block. */
+  @state() private _touTierInfo: TouTierInfo | null = null;
   @state() private _touLimits: TouLimits = {
     heat_min: 17,
     heat_max: 28,
@@ -520,6 +523,7 @@ export class RoomMindPanel extends LitElement {
             .rooms=${this._rooms}
             .touRules=${this._touRules}
             .touLimits=${this._touLimits}
+            .touTierInfo=${this._touTierInfo}
             @back-clicked=${this._onBackFromDetail}
             @room-updated=${this._onRoomUpdated}
           ></rs-room-detail>
@@ -710,6 +714,7 @@ export class RoomMindPanel extends LitElement {
       .rooms=${this._rooms}
       .roomsWithoutArea=${this._roomsWithoutArea}
       .climateControlActive=${this._climateControlActive}
+      .touTierInfo=${this._touTierInfo}
     ></rs-settings>`;
   }
 
@@ -830,6 +835,7 @@ export class RoomMindPanel extends LitElement {
         coil_dry_fan_mode: string;
         tou_rules: TouRule[];
         tou_limits?: TouLimits;
+        tou_tier_info?: TouTierInfo | null;
       }>({
         type: "roommind/rooms/list",
       });
@@ -854,6 +860,7 @@ export class RoomMindPanel extends LitElement {
       this._presenceAwayAction = result.presence_away_action ?? "eco";
       this._touRules = result.tou_rules ?? [];
       this._touLimits = result.tou_limits ?? this._touLimits;
+      this._touTierInfo = result.tou_tier_info ?? null;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.debug("[RoomMind] loadRooms:", err);

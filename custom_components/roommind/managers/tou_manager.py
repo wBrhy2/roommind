@@ -330,6 +330,12 @@ class TouManager:
         self._timeline: TouTimeline | None = None
         self._source_kind: str = TOU_SOURCE_NONE
         self._rate_unit: str = ""
+        # Tier-dictionary observations (in-memory, rebuilt as cycles read the
+        # sources): raw period states -> what they mapped to, and the last
+        # rate seen per tier. They feed the settings panel's "tiers as your
+        # source feeds them" block; a restart simply clears them.
+        self._observed_states: dict[str, dict[str, Any]] = {}
+        self._observed_rates: dict[str, dict[str, Any]] = {}
 
     @property
     def timeline(self) -> TouTimeline | None:
@@ -402,9 +408,11 @@ class TouManager:
         if period_entity and mode in ("auto", "period"):
             state = self.hass.states.get(period_entity)
             if state is not None and state.state not in ("unavailable", "unknown"):
-                tier = normalize_period_state(state.state)
+                tier = self._normalize_period(state.state, settings)
+                self._observe_period_state(state.state, tier)
                 if tier != TOU_TIER_UNKNOWN:
                     rate, unit = self._read_rate(settings)
+                    self._observe_rate(tier, rate, unit)
                     return tier, rate, unit, TOU_SOURCE_PERIOD
 
         flags = settings.get("tou_flag_entities") or {}
@@ -415,6 +423,7 @@ class TouManager:
                 state = self.hass.states.get(entity_id)
                 if state is not None and state.state == "on":
                     rate, unit = self._read_rate(settings)
+                    self._observe_rate(str(tier), rate, unit)
                     return str(tier), rate, unit, TOU_SOURCE_FLAGS
 
         rate, unit = self._read_rate(settings)
@@ -422,8 +431,93 @@ class TouManager:
             return TOU_TIER_UNKNOWN, rate, unit, TOU_SOURCE_NONE
         tier = self._tier_from_rate(rate, settings)
         if tier != TOU_TIER_UNKNOWN:
+            self._observe_rate(tier, rate, unit)
             return tier, rate, unit, TOU_SOURCE_RATE
         return TOU_TIER_UNKNOWN, rate, unit, TOU_SOURCE_NONE
+
+    @staticmethod
+    def _normalize_period(state: str, settings: dict[str, Any]) -> str:
+        """``normalize_period_state`` with the user's vocabulary consulted first.
+
+        ``tou_period_aliases`` maps a lower-cased raw period state onto a tier
+        and overrides the built-in word recognition — the fix lever for
+        provider wording the normalizer cannot read. The settings panel
+        surfaces those unreads as unmapped strings the user can assign.
+        """
+        key = (state or "").strip().lower()
+        aliases = settings.get("tou_period_aliases")
+        if isinstance(aliases, dict):
+            mapped = aliases.get(key)
+            if mapped in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
+                return str(mapped)
+        return normalize_period_state(state)
+
+    def _observe_period_state(self, raw: str, tier: str) -> None:
+        """Remember a period state and what it mapped to (known or not)."""
+        key = (raw or "").strip().lower()
+        if not key:
+            return
+        entry = self._observed_states.setdefault(key, {"tier": tier, "count": 0})
+        entry["tier"] = tier
+        entry["count"] = int(entry.get("count", 0)) + 1
+        entry["ts"] = time.time()
+        if len(self._observed_states) > 64:  # provider vocabularies are small; stay bounded
+            oldest = min(self._observed_states.items(), key=lambda kv: kv[1].get("ts", 0.0))[0]
+            self._observed_states.pop(oldest, None)
+
+    def _observe_rate(self, tier: str, rate: float | None, unit: str) -> None:
+        """Remember the last rate seen while the tariff sat in *tier*."""
+        if rate is None or tier in (TOU_TIER_UNKNOWN, ""):
+            return
+        self._observed_rates[str(tier)] = {"rate": rate, "unit": unit, "ts": time.time()}
+
+    def tier_info(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """The tariff as the bound sources actually feed it.
+
+        Per tier: a price (last observed rate → manual-window rate → cost
+        threshold cutoff, with the kind so the UI can say "≥" honestly), the
+        raw vocabulary that resolves to it, and whether it is active now —
+        plus every period string the sources fed that nothing could map.
+        This is the settings panel's "does this match my bill?" block.
+        """
+        window_rate: dict[str, float] = {}
+        for row in settings.get("tou_rate_windows") or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                rate = float(row.get("rate"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            window_rate.setdefault(self._tier_from_rate(rate, settings), rate)
+        cutoff: dict[str, Any] = {
+            TOU_TIER_PEAK: settings.get("tou_peak_threshold"),
+            TOU_TIER_MID: settings.get("tou_mid_threshold"),
+            TOU_TIER_ULTRA_LOW: settings.get("tou_ultra_threshold"),
+        }
+        current = self._timeline.current_tier if self._timeline else TOU_TIER_UNKNOWN
+        raw_aliases = settings.get("tou_period_aliases")
+        aliases: dict[str, Any] = raw_aliases if isinstance(raw_aliases, dict) else {}
+        tiers: dict[str, Any] = {}
+        for tier in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
+            observed = self._observed_rates.get(tier)
+            rate_out: float | None = None
+            kind: str | None = None
+            if observed is not None:
+                rate_out, kind = float(observed["rate"]), "observed"
+            elif tier in window_rate:
+                rate_out, kind = window_rate[tier], "window"
+            elif isinstance(cutoff.get(tier), (int, float)):
+                rate_out, kind = float(cutoff[tier]), "cutoff"
+            names = sorted(state for state, v in self._observed_states.items() if v.get("tier") == tier)
+            names += [str(a) for a, t in aliases.items() if t == tier and str(a) not in names]
+            tiers[tier] = {"rate": rate_out, "kind": kind, "names": names[:8], "current": tier == current}
+        observed_unmapped: list[dict[str, int | str]] = [
+            {"state": state, "count": int(v.get("count", 0))}
+            for state, v in self._observed_states.items()
+            if v.get("tier") == TOU_TIER_UNKNOWN
+        ]
+        observed_unmapped.sort(key=lambda e: -int(e["count"]))
+        return {"unit": self._rate_unit, "tiers": tiers, "unmapped": observed_unmapped[:16]}
 
     def _read_rate(self, settings: dict[str, Any]) -> tuple[float | None, str]:
         entity_id = str(settings.get("tou_rate_entity") or "")

@@ -14,6 +14,7 @@ import type {
   RoomWithoutArea,
   TouCalendarBinding,
   TouRateWindow,
+  TouTierInfo,
 } from "../types";
 import { localize } from "../utils/localize";
 import { fireSaveStatus } from "../utils/events";
@@ -39,6 +40,8 @@ export class RsSettings extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
   @property({ attribute: false }) public roomsWithoutArea: RoomWithoutArea[] = [];
+  /** Tier dictionary from the panel (rooms/list); the live source readings. */
+  @property({ attribute: false }) public touTierInfo: TouTierInfo | null = null;
   @property({ type: Boolean }) public climateControlActive = true;
   @state() private _deletedOrphans: ReadonlySet<string> = new Set();
 
@@ -94,6 +97,7 @@ export class RsSettings extends LitElement {
   @state() private _touCoolMax = 30;
   @state() private _touSwing = 3;
   @state() private _touStoreGap = 1;
+  @state() private _touPeriodAliases: Record<string, string> = {};
   @state() private _coilDryEnabled = false;
   @state() private _coilDryMinutes = 20;
   @state() private _coilDryMode: "fan_only" | "dry" = "fan_only";
@@ -185,6 +189,7 @@ export class RsSettings extends LitElement {
       this._touCoolMax = s.tou_cool_max ?? 30;
       this._touSwing = s.tou_swing ?? 3;
       this._touStoreGap = s.tou_store_gap ?? 1;
+      this._touPeriodAliases = s.tou_period_aliases ?? {};
       this._coilDryEnabled = s.coil_dry_enabled ?? false;
       this._coilDryMinutes = s.coil_dry_minutes ?? 20;
       this._coilDryMode = s.coil_dry_mode ?? "fan_only";
@@ -366,6 +371,8 @@ export class RsSettings extends LitElement {
           .touCoolMax=${this._touCoolMax}
           .touSwing=${this._touSwing}
           .touStoreGap=${this._touStoreGap}
+          .touTierInfo=${this.touTierInfo}
+          .touPeriodAliases=${this._touPeriodAliases}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-tou>
       </rs-settings-panel>
@@ -570,6 +577,7 @@ export class RsSettings extends LitElement {
         tou_cool_max: this._touCoolMax,
         tou_swing: this._touSwing,
         tou_store_gap: this._touStoreGap,
+        tou_period_aliases: this._touPeriodAliases,
       });
       // Toggled again while the request was out: stays dirty, the queued save sends it.
       if (this._climateControlActive === sentClimateControl) this._climateControlDirty = false;

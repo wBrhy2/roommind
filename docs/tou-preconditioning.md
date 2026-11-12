@@ -60,6 +60,18 @@ is unknown and RoomMind behaves exactly as before: no shaping, no coasting.
 Manual overrides, vacation and all safety limits keep priority: a boost you
 started is never shaved by a tariff, and vacation setback is never boosted.
 
+### Confirming what your sources feed
+
+Tariff plans differ by provider, season and weekend — Ontario alone has
+two-to-four tier windows depending on the day. Settings → Time-of-Use shows
+**"Tiers as your source feeds them"**: every tier with the price your bound
+sources know (observed rate → manual-window rate → configured threshold,
+each marked so you can tell them apart) and the raw period names that resolve
+into it — plus the strings RoomMind could *not* place. Assign any unmapped
+name to a tier right there; the alias outranks the built-in word recognition
+from the next cycle on, so provider vocabulary the normalizer cannot read
+becomes a one-tap fix instead of a helper automation.
+
 ### Helpers as an escape hatch
 
 If your tariff source is unreliable — the integration's entity goes

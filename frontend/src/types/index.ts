@@ -119,6 +119,22 @@ export interface TouLimits {
 /** Per-room overrides of the global limits; null/undefined = inherit. */
 export type TouRoomLimits = Partial<Record<keyof TouLimits, number | null>>;
 
+/** Per-tier confirmation data from the bound tariff sources (see
+ * TouManager.tier_info): the price the sources know for that tier and the
+ * raw period vocabulary that resolves to it. */
+export interface TouTierInfoTier {
+  rate: number | null;
+  kind: "observed" | "window" | "cutoff" | null;
+  names: string[];
+  current: boolean;
+}
+
+export interface TouTierInfo {
+  unit: string;
+  tiers: Partial<Record<TouTier, TouTierInfoTier>>;
+  unmapped: { state: string; count: number }[];
+}
+
 /** Which source class answers the current tier ("auto" = legacy cascade). */
 export type TouTierSource = "auto" | "period" | "rate" | "flags";
 
@@ -348,6 +364,8 @@ export interface GlobalSettings {
   tou_swing?: number;
   tou_store_gap?: number;
   tou_coast_max_minutes?: number;
+  /** User-assigned period vocabulary: raw state (lower-cased) -> tier. */
+  tou_period_aliases?: Record<string, string>;
   /** Shared tariff rule library; cards reference entries by rule_id. */
   tou_rules?: TouRule[];
   room_order?: string[];

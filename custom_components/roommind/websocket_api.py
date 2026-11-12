@@ -434,6 +434,7 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_cool_max",
     "tou_swing",
     "tou_store_gap",
+    "tou_period_aliases",
     "tou_coast_max_minutes",
     "tou_schedules",
     "tou_rules",
@@ -610,6 +611,11 @@ async def websocket_list_rooms(
             "coil_dry_drain_minutes": settings.get("coil_dry_drain_minutes", DEFAULT_COIL_DRY_DRAIN_MINUTES),
             "compressor_groups": settings.get("compressor_groups", []),
             "tou_rules": settings.get("tou_rules", []),
+            # Tier dictionary: what the bound sources actually feed (prices,
+            # vocabulary, unmapped strings) for the settings confirmation block.
+            "tou_tier_info": (
+                tou_manager.tier_info(settings) if (tou_manager := getattr(coordinator, "_tou_manager", None)) else None
+            ),
             # Store-layer limits the room cards surface next to the toggle, so
             # a room can show the band and swing its economy will actually work in.
             "tou_limits": {
@@ -1202,6 +1208,11 @@ async def websocket_get_settings(
         ],
         vol.Optional("tou_flag_entities"): {vol.In(TOU_TIERS): str},
         vol.Optional("tou_price_weighting"): bool,
+        # User-assigned period vocabulary: raw state (lower-cased) -> tier.
+        # Consulted by TouManager._normalize_period before word recognition.
+        vol.Optional("tou_period_aliases"): {
+            vol.All(str, vol.Length(min=1, max=64)): vol.In(TOU_TIERS),
+        },
         vol.Optional("tou_peak_threshold"): vol.Any(None, vol.Coerce(float)),
         vol.Optional("tou_mid_threshold"): vol.Any(None, vol.Coerce(float)),
         vol.Optional("tou_ultra_threshold"): vol.Any(None, vol.Coerce(float)),

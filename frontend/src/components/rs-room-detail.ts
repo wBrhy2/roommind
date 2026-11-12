@@ -13,6 +13,7 @@ import type {
   DeviceRole,
   TouLimits,
   TouOverrideRow,
+  TouTierInfo,
   TouRule,
 } from "../types";
 import "./rs-hero-status";
@@ -117,6 +118,8 @@ export class RsRoomDetail extends LitElement {
   /** All rooms + the shared rule library, for the tariff schedule editor. */
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
   @property({ attribute: false }) public touRules: TouRule[] = [];
+  /** Tier dictionary (prices/vocabulary) from the panel, for tier labels. */
+  @property({ attribute: false }) public touTierInfo: TouTierInfo | null = null;
   @property({ attribute: false }) public touLimits: TouLimits = {
     heat_min: 17,
     heat_max: 28,
@@ -717,6 +720,7 @@ export class RsRoomDetail extends LitElement {
                     .rules=${this.touRules}
                     .limits=${this.touLimits}
                     .roomLimits=${this._touRoomLimits}
+                    .tierInfo=${this.touTierInfo}
                     .allRooms=${this.rooms}
                     .areaId=${this.area.area_id}
                     @setting-changed=${this._onTouSettingChanged}
@@ -1023,6 +1027,7 @@ export class RsRoomDetail extends LitElement {
             .rules=${this.touRules}
             .limits=${this.touLimits}
             .roomLimits=${this._touRoomLimits}
+            .tierInfo=${this.touTierInfo}
             .allRooms=${this.rooms}
             .areaId=${this.area.area_id}
             @setting-changed=${this._onTouSettingChanged}
