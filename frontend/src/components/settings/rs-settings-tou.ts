@@ -72,6 +72,7 @@ export class RsSettingsTou extends LitElement {
   @property({ type: String }) public touPeriodEntity = "";
   @property({ type: String }) public touNextChangeEntity = "";
   @property({ type: String }) public touNextRateEntity = "";
+  @property({ type: String }) public touNextPeriodEntity = "";
   @property({ type: String }) public touNextChangeTier: TouTier | "" = "peak";
   @property({ type: Array }) public touCalendarEntities: TouCalendarBinding[] = [];
   @property({ type: Array }) public touRateWindows: TouRateWindow[] = [];
@@ -167,6 +168,11 @@ export class RsSettingsTou extends LitElement {
         border-radius: 8px;
         padding: 6px 10px;
         margin: 6px 0 2px;
+      }
+      .dic-next-hint {
+        font-size: 12px;
+        color: var(--warning-color, #ff9800);
+        margin: 2px 0 4px;
       }
       .dic-unmapped-title {
         font-weight: 500;
@@ -362,7 +368,7 @@ export class RsSettingsTou extends LitElement {
       this.touRateWindows.some((w) => w.start && w.end)
     )
       return "calendar";
-    if (this.touNextRateEntity) return "next_change_rate";
+    if (this.touNextRateEntity || this.touNextPeriodEntity) return "next_change_rate";
     if (this.touNextChangeEntity) return "next_change";
     return "next_change_rate";
   }
@@ -544,13 +550,15 @@ export class RsSettingsTou extends LitElement {
                               : nothing
                           }
                         </div>
-                        <div class="hint">${localize("tou.next_rate_hint", l)}</div>`
+                        <div class="hint">${localize("tou.next_rate_hint", l)}</div>
+                        ${this._nextPeriodPicker()}`
                     : nothing
                 }
                 ${
                   look === "next_change"
                     ? html`${this._nextChangeTimeRow()} ${this._renderNextTierSelect()}
-                        <div class="hint">${localize("tou.next_change_tier_hint", l)}</div>`
+                        <div class="hint">${localize("tou.next_change_tier_hint", l)}</div>
+                        ${this._nextPeriodPicker()}`
                     : nothing
                 }
               </div>
@@ -663,6 +671,32 @@ export class RsSettingsTou extends LitElement {
           : nothing
       }
     </div>`;
+  }
+
+  /** Optional next-period *name* sensor: providers that label the upcoming
+   * period ("ulo_mid_peak") let RoomMind learn the coming tier from the same
+   * vocabulary recognition as the current period, thresholds not required. */
+  private _nextPeriodPicker() {
+    const l = this.hass.language;
+    return html` <div class="picker-row">
+        <ha-entity-picker
+          .hass=${this.hass}
+          .value=${this.touNextPeriodEntity}
+          .includeDomains=${["sensor", "input_select"]}
+          .label=${localize("tou.next_period_entity", l)}
+          @value-changed=${(e: CustomEvent) => this._fire("touNextPeriodEntity", (e.detail?.value as string) ?? "")}
+        ></ha-entity-picker>
+        ${
+          this.touNextPeriodEntity
+            ? html`<ha-icon-button
+                .path=${CLOSE_ICON}
+                .label=${localize("tou.clear", l)}
+                @click=${() => this._fire("touNextPeriodEntity", "")}
+              ></ha-icon-button>`
+            : nothing
+        }
+      </div>
+      <div class="hint">${localize("tou.next_period_hint", l)}</div>`;
   }
 
   /** Next-change tier select; "Not set" ("" ) disables the lookahead step. */
@@ -916,12 +950,16 @@ export class RsSettingsTou extends LitElement {
           ? ` · ${this._num(info.next.rate)}${info.unit ? ` ${info.unit}` : ""}`
           : "";
       const stale = info.next.stale ? ` (${localize("tou.dic_last_known", l)})` : "";
+      const clock = info.next.ts != null ? ` ${this._clock(info.next.ts)}` : "";
       parts.push(
-        `${localize("tou.dic_next_label", l)} ${localize(`tou.tier.${info.next.tier}`, l)} ${this._clock(info.next.ts)}${price}${stale}`,
+        `${localize("tou.dic_next_label", l)} ${localize(`tou.tier.${info.next.tier}`, l)}${clock}${price}${stale}`,
       );
     }
-    if (parts.length === 0) return nothing;
-    return html`<div class="dic-summary">${parts.join(" — ")}</div>`;
+    const hint = info.next_hint ? localize(`tou.dic_next_hint_${info.next_hint}`, l) : "";
+    if (parts.length === 0 && !hint) return nothing;
+    return html`${parts.length ? html`<div class="dic-summary">${parts.join(" — ")}</div>` : nothing}${
+      hint ? html`<div class="dic-next-hint">${hint}</div>` : nothing
+    }`;
   }
 
   private _assignAlias(state: string, tier: string) {

@@ -140,7 +140,11 @@ export interface TouTierInfo {
   tiers: Partial<Record<TouTier, TouTierInfoTier>>;
   unmapped: { state: string; count: number }[];
   current: { tier: TouTier; rate: number; stale: boolean } | null;
-  next: { ts: number; tier: TouTier; rate: number | null; stale: boolean } | null;
+  next: { ts: number | null; tier: TouTier; rate: number | null; stale: boolean } | null;
+  /** Why the future view is incomplete while its sensors are bound:
+   * "no_tier" (nothing says which period follows), "no_time" (the change
+   * sensor is not a timestamp), "no_price" (no price for the coming tier). */
+  next_hint?: "no_tier" | "no_time" | "no_price" | "";
 }
 
 /** Which source class answers the current tier ("auto" = legacy cascade). */
@@ -356,6 +360,10 @@ export interface GlobalSettings {
   tou_period_entity?: string;
   tou_next_change_entity?: string;
   tou_next_rate_entity?: string;
+  /** Optional sensor publishing the *name* of the next period (e.g.
+   * "ulo_mid_peak"); its vocabulary maps to the coming tier without
+   * thresholds or a fixed dropdown. */
+  tou_next_period_entity?: string;
   /** "" = no lookahead (the next-change step is disabled). */
   tou_next_change_tier?: TouTier | "";
   tou_calendar_entities?: TouCalendarBinding[];

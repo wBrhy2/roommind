@@ -398,10 +398,15 @@ class TouManager:
                 events.append((win_start, win_end, win_tier))
 
         if not events and lookahead in ("auto", "next_change", "next_change_rate"):
-            next_ts, next_tier = self._resolve_next_change(settings, lookahead)
-            if next_ts is not None and now < next_ts < horizon:
+            next_ts, next_tier, next_rate, next_unit = self._resolve_next_view(settings, lookahead)
+            if next_ts is not None and next_tier is not None and now < next_ts < horizon:
                 points.add(next_ts)
                 events.append((next_ts, horizon, next_tier))
+            if next_tier is not None and next_rate is not None:
+                # The provider's price for the upcoming period is a real cost
+                # observation of that tier: keep it now, so the tier row can
+                # answer "(last known)" before the period ever starts.
+                self._observe_rate(next_tier, next_rate, next_unit)
 
         segments = self._paint_segments(now, horizon, current, events)
         timeline = TouTimeline(segments, current_tier=current, current_rate=rate)
@@ -603,22 +608,42 @@ class TouManager:
         # seed from persisted history so the dictionary is never needlessly blank.
         self._load_price_history(settings)
         current = self._timeline.current_tier if self._timeline else TOU_TIER_UNKNOWN
-        next_ts, next_tier = (
-            self._next_change_from_timeline(self._timeline) if self._timeline is not None else (None, None)
-        )
         # Pull, don't recall: read the bound entities fresh on every view.
         live_rate, live_unit = self._read_rate(settings)
         if not live_unit:
             any_last = self._last_known_rate()
             live_unit = any_last[1] if any_last else ""
+        next_ts, next_tier = (
+            self._next_change_from_timeline(self._timeline) if self._timeline is not None else (None, None)
+        )
         next_rate: float | None = None
         next_stale = False
-        if next_tier:
-            next_rate = self._read_float_state(str(settings.get("tou_next_rate_entity") or ""))
-            if next_rate is None:
-                found = self._last_rate_for_tier(str(next_tier))
-                if found is not None:
-                    next_rate, next_stale = found[0], True
+        next_hint = ""
+        lookahead_mode = str(settings.get("tou_lookahead") or "auto")
+        future_bound = bool(
+            str(settings.get("tou_next_change_entity") or "")
+            or str(settings.get("tou_next_period_entity") or "")
+            or str(settings.get("tou_next_rate_entity") or "")
+        )
+        if lookahead_mode != "none":
+            v_ts, v_tier, v_rate, _v_unit = self._resolve_next_view(settings, lookahead_mode)
+            if next_ts is None:
+                next_ts = v_ts
+            if not next_tier:
+                next_tier = v_tier
+            if next_tier:
+                next_rate = v_rate
+                if next_rate is None:
+                    found = self._last_rate_for_tier(str(next_tier))
+                    if found is not None:
+                        next_rate, next_stale = found[0], True
+            if future_bound:
+                if not next_tier:
+                    next_hint = "no_tier"
+                elif next_ts is None:
+                    next_hint = "no_time"
+                elif next_rate is None:
+                    next_hint = "no_price"
         raw_aliases = settings.get("tou_period_aliases")
         aliases: dict[str, Any] = raw_aliases if isinstance(raw_aliases, dict) else {}
         tiers: dict[str, Any] = {}
@@ -657,8 +682,13 @@ class TouManager:
             if rate_c is not None:
                 current_block = {"tier": current, "rate": rate_c, "stale": live_rate is None}
         next_block: dict[str, Any] | None = None
-        if next_ts is not None and next_tier in tiers:
-            next_block = {"ts": round(next_ts, 1), "tier": str(next_tier), "rate": next_rate, "stale": next_stale}
+        if next_tier in tiers and (next_ts is not None or next_rate is not None):
+            next_block = {
+                "ts": round(next_ts, 1) if next_ts is not None else None,
+                "tier": str(next_tier),
+                "rate": next_rate,
+                "stale": next_stale,
+            }
         observed_unmapped: list[dict[str, int | str]] = [
             {"state": state, "count": int(v.get("count", 0))}
             for state, v in self._observed_states.items()
@@ -671,10 +701,14 @@ class TouManager:
             "unmapped": observed_unmapped[:16],
             "current": current_block,
             "next": next_block,
+            "next_hint": next_hint,
         }
 
     def _read_rate(self, settings: dict[str, Any]) -> tuple[float | None, str]:
-        entity_id = str(settings.get("tou_rate_entity") or "")
+        return self._read_rate_entity(str(settings.get("tou_rate_entity") or ""))
+
+    def _read_rate_entity(self, entity_id: str) -> tuple[float | None, str]:
+        """Numeric state and unit of any bound rate-like entity, or (None, "")."""
         if not entity_id:
             return None, ""
         state = self.hass.states.get(entity_id)
@@ -703,56 +737,63 @@ class TouManager:
             return TOU_TIER_ULTRA_LOW
         return TOU_TIER_OFF
 
-    def _resolve_next_change(self, settings: dict[str, Any], lookahead: str) -> tuple[float | None, str]:
-        """Read the next-change timestamp and the tier that follows it.
+    def _resolve_next_view(
+        self, settings: dict[str, Any], lookahead: str
+    ) -> tuple[float | None, str | None, float | None, str]:
+        """The upcoming period pulled from the bound future sensors.
 
-        ``next_change_rate`` mode classifies the rate the provider publishes
-        for the period after the change (same cost thresholds as the rate
-        tier source); the fixed-tier modes read the tier dropdown. An
-        unusable input at either step yields no lookahead at all rather
-        than a guessed tier.
+        Returns ``(ts, tier, rate, unit)``: the change time from
+        ``tou_next_change_entity``, the price from ``tou_next_rate_entity``,
+        and the tier from whichever future source can answer — the
+        next-period sensor's vocabulary (provider names like ``ulo_mid_peak``
+        mapped by the same recognition as the current period), the cost
+        thresholds applied to the next rate, or the fixed tier dropdown, in
+        the order ``tou_lookahead`` trusts them. A next-change slot fed a
+        period *name* instead of a timestamp is understood as vocabulary
+        rather than discarded: the tier and price still arrive, minus the
+        time. No source is ever guessed past its evidence.
         """
-        entity_id = str(settings.get("tou_next_change_entity") or "")
-        if not entity_id:
-            return None, TOU_TIER_UNKNOWN
-        state = self.hass.states.get(entity_id)
-        if state is None or state.state in ("unavailable", "unknown"):
-            return None, TOU_TIER_UNKNOWN
-        raw: datetime | None
-        if isinstance(state.state, datetime):
-            raw = state.state
-        else:
-            raw = dt_util.parse_datetime(str(state.state))
-        if raw is None:
-            return None, TOU_TIER_UNKNOWN
-        if lookahead == "next_change_rate":
-            if not self._thresholds_present(settings):
-                return None, TOU_TIER_UNKNOWN
-            next_rate = self._read_float_state(str(settings.get("tou_next_rate_entity") or ""))
-            tier = self._tier_from_rate(next_rate, settings)
-            if tier == TOU_TIER_UNKNOWN:
-                return None, TOU_TIER_UNKNOWN
-            return raw.timestamp(), tier
-        tier = str(settings.get("tou_next_change_tier") or "")
-        if tier not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
-            if lookahead == "auto" and settings.get("tou_next_rate_entity") and self._thresholds_present(settings):
-                tier = self._tier_from_rate(self._read_float_state(str(settings["tou_next_rate_entity"])), settings)
-                if tier != TOU_TIER_UNKNOWN:
-                    return raw.timestamp(), tier
-            return None, TOU_TIER_UNKNOWN
-        return raw.timestamp(), tier
+        ts: float | None = None
+        slot_tier: str | None = None
+        change_id = str(settings.get("tou_next_change_entity") or "")
+        if change_id:
+            state = self.hass.states.get(change_id)
+            if state is not None and state.state not in ("unavailable", "unknown"):
+                raw: datetime | None
+                if isinstance(state.state, datetime):
+                    raw = state.state
+                else:
+                    raw = dt_util.parse_datetime(str(state.state))
+                if raw is not None:
+                    ts = raw.timestamp()
+                else:
+                    guessed = self._normalize_period(str(state.state), settings)
+                    slot_tier = guessed if guessed != TOU_TIER_UNKNOWN else None
 
-    def _read_float_state(self, entity_id: str) -> float | None:
-        """Numeric state of any bound entity, or None (unavailable/garbage)."""
-        if not entity_id:
-            return None
-        state = self.hass.states.get(entity_id)
-        if state is None or state.state in ("unavailable", "unknown"):
-            return None
-        try:
-            return float(state.state)
-        except (TypeError, ValueError):
-            return None
+        period_tier: str | None = None
+        period_id = str(settings.get("tou_next_period_entity") or "")
+        if period_id:
+            state = self.hass.states.get(period_id)
+            if state is not None and state.state not in ("unavailable", "unknown"):
+                guessed = self._normalize_period(state.state, settings)
+                period_tier = guessed if guessed != TOU_TIER_UNKNOWN else None
+
+        next_rate, next_unit = self._read_rate_entity(str(settings.get("tou_next_rate_entity") or ""))
+        rate_tier: str | None = None
+        if next_rate is not None and self._thresholds_present(settings):
+            rate_tier = self._tier_from_rate(next_rate, settings)
+
+        dropdown = str(settings.get("tou_next_change_tier") or "")
+        if dropdown not in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
+            dropdown = ""
+
+        if lookahead == "next_change_rate":
+            # The rate decides in this mode; a fixed dropdown must not outrank it.
+            order: list[str] = [p for p in (period_tier, rate_tier, slot_tier) if p]
+        else:
+            order = [p for p in (period_tier, dropdown, rate_tier, slot_tier) if p]
+        tier = order[0] if order else None
+        return ts, tier, next_rate, next_unit
 
     @staticmethod
     def _thresholds_present(settings: dict[str, Any]) -> bool:

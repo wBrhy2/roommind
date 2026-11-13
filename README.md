@@ -32,9 +32,10 @@
 - **Heat Source Orchestration** - Rooms with both TRVs and ACs automatically route heating demand to the most efficient device based on temperature gap and outdoor conditions.
 - **Compressor Group Protection** - Define groups of climate devices sharing an outdoor compressor. Enforces minimum run and off times to prevent short-cycling. Until `min_run_minutes` has elapsed, a device keeps its last active setpoint, including a boost setpoint, so the room can overshoot its target further than without protection. A target that changes on purpose in the meantime (override, vacation, schedule off, presence) is passed on to the device right away (a device with a single heat/cool setpoint only when that cannot push the room the wrong way).
 - **Time-of-Use Control & Pre-conditioning** - Link a tariff source (cost/period sensors, Hydro One, Tibber, Nord Pool, tariff calendars, or plain period flags) and let each room store energy between tariff periods: targets relax across expensive stretches and pre-charge before them, bounded by a consent band, a max swing and a price gap that must justify the move. Tariff rows on the device cards anchor target overrides to tariff periods — including a decay-derived "reach N °C by time" that stops heating at the cheap-window end and coasts the room to the exact arrival temperature, planned by price-weighted MPC against the learned model. Manual overrides and vacation stay in charge. The settings panel shows the
-tariff as your sources actually feed it — tier prices pulled live and period
-vocabulary — keeps the last valid price when a cost source drops, and lets you
-assign names RoomMind cannot recognize. See
+tariff as your sources actually feed it — tier prices pulled live, the
+coming period with its published price, period vocabulary — keeps the last
+valid price when a cost source drops, and lets you assign names RoomMind
+cannot recognize. See
 [docs/tou-preconditioning.md](docs/tou-preconditioning.md).
 - **Fan-only & Setback Idle Modes** - AC and heat pump devices can switch to fan-only or setback mode instead of turning off, keeping air circulation or low-load operation active. Optionally, setback turns the device off after a long pause with no demand ahead.
 - **Per-Device Setpoint Mode** - Choose proportional (boost setpoint) or direct (exact target) control per device for optimal results with different hardware. For direct devices whose internal sensor reads differently from your room sensor, a setpoint offset shifts the temperature sent to the device.

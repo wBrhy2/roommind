@@ -41,8 +41,12 @@ shaping of the currently active tier applies):
   *when* the next change starts but *what the price will be* after it (a
   "next rate" entity). Bind it alongside the next-change timestamp and
   RoomMind classifies that price with the same cost thresholds to learn the
-  incoming tier — no fixed "leads into" guess needed. If the reading is
-  unavailable or the thresholds are missing, the lookahead simply stays off.
+  incoming tier — no fixed "leads into" guess needed. With no thresholds,
+  bind the provider's **next-period name** sensor instead (below): the same
+  word recognition that reads the current period names the coming tier.
+  Each price the provider publishes for the next period is remembered per
+  tier the moment it is seen — the tier row answers "(last known)" before
+  that period has ever started.
 - **Next change sensor** — for integrations that only publish a timestamp
   for the next tier boundary (e.g. Hydro One's `…_next_peak_starts`).
   RoomMind sees *one step* ahead: the sensor gives the when, the **Tier
@@ -51,11 +55,19 @@ shaping of the currently active tier applies):
   exactly right for a "next *peak* starts" sensor (pick Peak), which always
   changes into peak; pick **Not set** to disable the lookahead again. A
   generic "next change" timestamp that alternates between tiers cannot be
-  pinned this way — use calendars instead.
+  pinned this way — use calendars instead, or the **next-period name**
+  sensor: providers that also label the period after the change (Hydro
+  One's `…_next_peak`, stating `ulo_mid_peak`) can bind it in a dedicated
+  slot, and RoomMind learns the coming tier from its wording — no
+  thresholds, no fixed pick. A name answered in the *timestamp* slot is
+  understood as that vocabulary too (tier and price show, minus the clock,
+  with a note in the dictionary telling you to bind the starts sensor).
 - **No future view** — shaping only.
 
 When nothing resolves (sensor deleted, unavailable, no thresholds), the tier
 is unknown and RoomMind behaves exactly as before: no shaping, no coasting.
+While future sensors *are* bound, the tier dictionary says which piece is
+missing instead of going blank: no tier, no timestamp, or no price.
 
 Manual overrides, vacation and all safety limits keep priority: a boost you
 started is never shaved by a tariff, and vacation setback is never boosted.
@@ -73,19 +85,23 @@ from the next cycle on, so provider vocabulary the normalizer cannot read
 becomes a one-tap fix instead of a helper automation.
 
 The block **pulls, it does not merely recall**: opening it re-reads the cost
-sensor (current tier), the next-change and next-rate sensors (what is coming,
-with the price the provider already publishes for it) and the tariff
-timeline, so the summary line — *Now: Off-peak · 8.4 ¢/kWh — next: Peak at
-17:00 · 12.8 ¢/kWh* — reflects your sources right now, not a stale page load.
+sensor (current tier), the future sensors (the next-change timestamp, the
+next-period name and the next-rate sensors — what is coming and what the
+provider already publishes for it) and the tariff timeline, so the summary
+line — *Now: Off-peak · 8.4 ¢/kWh — next: Peak at 17:00 · 12.8 ¢/kWh* —
+reflects your sources right now, not a stale page load. When the future view
+is incomplete it says which piece is missing (tier, time or price) instead
+of showing a bare "no price".
 
 Every valid price is also **remembered**: per tier, RoomMind persists the
 last valid cost, a rolling two-week range and an observation count
-(`tou_price_history`). If the cost entity drops, nothing goes blind — the
-panel keeps showing the last known price (marked "(last known)"), the
-`roommind_energy_rate` sensor reports it, and a tariff whose tier is derived
-from cost thresholds keeps classifying with it for an hour, long enough to
-ride out a flaky integration but never long enough for a stale price to
-steer your heating.
+(`tou_price_history`) — including the provider's price for the upcoming
+period, kept before that period has ever started. If the cost entity drops,
+nothing goes blind — the panel keeps showing the last known price (marked
+"(last known)"), the `roommind_energy_rate` sensor reports it, and a tariff
+whose tier is derived from cost thresholds keeps classifying with it for an
+hour, long enough to ride out a flaky integration but never long enough for
+a stale price to steer your heating.
 
 ### Helpers as an escape hatch
 
@@ -368,3 +384,20 @@ tier timeline; the panel shows the active tier.
    by 09:00) — RoomMind derives the boundary temperature from the learned decay
    so heating stops when the cheap window ends and the room is exactly 20 °C at
    departure.
+
+## Example: Hydro One ULO without calendars (sensors only)
+
+The provider's own future sensors are enough — no calendars, no cost
+thresholds needed:
+
+- Cost sensor: `…_current_all_in_rate`; Period sensor: `…_active_peak`
+  (states like `ulo_overnight`, recognized by word recognition).
+- Future view ("Plan the tariff future from" → **Next-change rate sensor**):
+  timestamp `…_next_peak_starts`, price `…_next_peak_all_in_rate`, and the
+  name sensor `…_next_peak` in the **next period name** slot. The tier that
+  follows comes from its wording (`ulo_mid_peak` → mid-peak), its price from
+  the rate sensor; the dictionary shows *next: Mid-peak at 07:00 · 0.1766*
+  and keeps that value through provider outages.
+- Binding the name sensor in the *timestamp* slot still tells you the tier
+  and the price — the dictionary then notes the missing clock; swap the
+  slot to `…_next_peak_starts` to complete the view.

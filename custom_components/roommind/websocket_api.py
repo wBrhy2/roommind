@@ -420,6 +420,7 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_period_entity",
     "tou_next_change_entity",
     "tou_next_rate_entity",
+    "tou_next_period_entity",
     "tou_next_change_tier",
     "tou_calendar_entities",
     "tou_rate_windows",
@@ -1187,6 +1188,7 @@ async def websocket_get_settings(
         vol.Optional("tou_period_entity"): str,
         vol.Optional("tou_next_change_entity"): str,
         vol.Optional("tou_next_rate_entity"): str,
+        vol.Optional("tou_next_period_entity"): str,
         vol.Optional("tou_next_change_tier"): vol.Any("", vol.In(TOU_TIERS)),
         vol.Optional("tou_calendar_entities"): vol.All(
             [

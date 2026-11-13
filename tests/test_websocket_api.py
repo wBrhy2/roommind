@@ -3514,6 +3514,23 @@ async def test_save_settings_tou_schedule_arrive_record(ws_hass, store, connecti
 
 
 @pytest.mark.asyncio
+async def test_save_settings_tou_next_period_entity(ws_hass, store, connection):
+    """The optional next-period name sensor survives the production schema."""
+    await store.async_load()
+
+    msg = {
+        "id": 71,
+        "type": "roommind/settings/save",
+        "tou_next_period_entity": "sensor.hydro_one_next_peak",
+    }
+    await _save_settings(ws_hass, connection, msg)
+
+    connection.send_result.assert_called_once()
+    settings = connection.send_result.call_args[0][1]["settings"]
+    assert settings["tou_next_period_entity"] == "sensor.hydro_one_next_peak"
+
+
+@pytest.mark.asyncio
 async def test_save_settings_tou_rate_windows(ws_hass, store, connection):
     """Manual tariff windows persist with their weekday lists and wrapping times."""
     await store.async_load()

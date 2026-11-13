@@ -262,6 +262,139 @@ async def test_tier_info_pulls_next_period_with_cost() -> None:
     assert info["tiers"][TOU_TIER_OFF]["current"] is True
 
 
+@pytest.mark.asyncio
+async def test_next_period_word_in_change_slot_still_shows_the_price() -> None:
+    """A provider's period *name* in the next-change slot is understood.
+
+    The Hydro One shape: "next peak" answers "ulo_mid_peak" where a
+    timestamp is expected, "next_change_rate" is on, and no cost thresholds
+    exist to classify the price. Old behavior: the future view died in
+    silence and every other tier row read "no price". Now: the vocabulary
+    recognition maps the name to the coming tier, the next-rate reading
+    arrives with it, the missing clock is only hinted — never a blank —
+    and the upcoming price lands in the persisted history. A stale fixed
+    dropdown must not outrank the provider's own next-period answer.
+    """
+    hass = _make_hass(
+        {
+            "sensor.period": "ulo_overnight",
+            "sensor.rate": "0.0638",
+            "sensor.next_peak": "ulo_mid_peak",
+            "sensor.next_rate": "0.1766",
+        }
+    )
+    settings = {
+        "tou_enabled": True,
+        "tou_tier_source": "period",
+        "tou_period_entity": "sensor.period",
+        "tou_rate_entity": "sensor.rate",
+        "tou_next_change_entity": "sensor.next_peak",
+        "tou_next_rate_entity": "sensor.next_rate",
+        "tou_next_change_tier": "off",  # stale user pick: must not win
+        "tou_lookahead": "next_change_rate",
+    }
+    mgr = TouManager(hass)
+    timeline = await mgr.async_build_timeline(settings)
+    assert timeline is not None and len(timeline.segments) == 1  # no time -> no boundary
+
+    info = mgr.tier_info(settings)
+    assert info["next"] is not None
+    assert info["next"]["ts"] is None and info["next"]["tier"] == TOU_TIER_MID
+    assert info["next"]["rate"] == 0.1766 and info["next"]["stale"] is False
+    assert info["next_hint"] == "no_time"
+    assert info["tiers"][TOU_TIER_MID]["kind"] == "next"
+
+    store = hass.data[DOMAIN]["store"]
+    persisted = store.async_save_settings.call_args[0][0]["tou_price_history"]
+    assert persisted[TOU_TIER_MID]["rate"] == 0.1766
+
+
+@pytest.mark.asyncio
+async def test_next_period_sensor_completes_the_future_view() -> None:
+    """The dedicated next-period slot plus the timestamp gives the full view,
+    and after the price source drops the persisted next-period value answers
+    (marked stale, no nagging hint)."""
+    future = time.time() + 2 * 3600.0
+    hass = _make_hass(
+        {
+            "sensor.period": "ulo_overnight",
+            "sensor.rate": "0.0638",
+            "sensor.next_starts": dt_util.utc_from_timestamp(future).isoformat(),
+            "sensor.next_peak": "ulo_mid_peak",
+            "sensor.next_rate": "0.1766",
+        }
+    )
+    settings = {
+        "tou_enabled": True,
+        "tou_tier_source": "period",
+        "tou_period_entity": "sensor.period",
+        "tou_rate_entity": "sensor.rate",
+        "tou_next_change_entity": "sensor.next_starts",
+        "tou_next_period_entity": "sensor.next_peak",
+        "tou_next_rate_entity": "sensor.next_rate",
+        "tou_lookahead": "next_change_rate",
+    }
+    mgr = TouManager(hass)
+    timeline = await mgr.async_build_timeline(settings)
+    assert timeline is not None and timeline.tier_at(future + 30) == TOU_TIER_MID
+
+    info = mgr.tier_info(settings)
+    assert info["next_hint"] == ""
+    assert info["next"]["ts"] is not None and info["next"]["tier"] == TOU_TIER_MID
+    assert info["next"]["rate"] == 0.1766
+
+    # Provider blip: the observed next-period price keeps the view honest.
+    good = {
+        "sensor.period": _state("ulo_overnight"),
+        "sensor.rate": _state("0.0638"),
+        "sensor.next_starts": _state(dt_util.utc_from_timestamp(future).isoformat()),
+        "sensor.next_peak": _state("ulo_mid_peak"),
+        "sensor.next_rate": _state("unavailable"),
+    }
+    hass.states.get = MagicMock(side_effect=good.get)
+    info2 = mgr.tier_info(settings)
+    assert info2["next"]["tier"] == TOU_TIER_MID
+    assert info2["next"]["rate"] == 0.1766 and info2["next"]["stale"] is True
+    assert info2["next_hint"] == ""
+
+
+@pytest.mark.asyncio
+async def test_next_hint_reports_what_the_future_view_is_missing() -> None:
+    """Future sensors bound but unable to answer leave an honest hint, not a
+    silent "no price" row."""
+
+    # Timestamp fine, but nothing says which tier follows: no_tier.
+    future = time.time() + 2 * 3600.0
+    hass = _make_hass({"sensor.period": "ulo_overnight", "sensor.nx": dt_util.utc_from_timestamp(future).isoformat()})
+    mgr = TouManager(hass)
+    settings = {
+        "tou_enabled": True,
+        "tou_period_entity": "sensor.period",
+        "tou_next_change_entity": "sensor.nx",
+    }
+    await mgr.async_build_timeline(settings)
+    assert mgr.tier_info(settings)["next_hint"] == "no_tier"
+
+    # Tier and time known, next-rate bound but dead and no history: no_price.
+    hass2 = _make_hass(
+        {
+            "sensor.period": "ulo_overnight",
+            "sensor.nx": dt_util.utc_from_timestamp(future).isoformat(),
+            "sensor.nx_rate": "unavailable",
+        }
+    )
+    mgr2 = TouManager(hass2)
+    settings2 = {
+        "tou_enabled": True,
+        "tou_period_entity": "sensor.period",
+        "tou_next_change_entity": "sensor.nx",
+        "tou_next_change_tier": TOU_TIER_MID,
+        "tou_next_rate_entity": "sensor.nx_rate",
+    }
+    await mgr2.async_build_timeline(settings2)
+    assert mgr2.tier_info(settings2)["next_hint"] == "no_price"
+
+
 # ---------------------------------------------------------------------------
 # Timeline building from sources
 # ---------------------------------------------------------------------------
