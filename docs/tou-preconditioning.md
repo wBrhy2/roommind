@@ -72,6 +72,21 @@ name to a tier right there; the alias outranks the built-in word recognition
 from the next cycle on, so provider vocabulary the normalizer cannot read
 becomes a one-tap fix instead of a helper automation.
 
+The block **pulls, it does not merely recall**: opening it re-reads the cost
+sensor (current tier), the next-change and next-rate sensors (what is coming,
+with the price the provider already publishes for it) and the tariff
+timeline, so the summary line — *Now: Off-peak · 8.4 ¢/kWh — next: Peak at
+17:00 · 12.8 ¢/kWh* — reflects your sources right now, not a stale page load.
+
+Every valid price is also **remembered**: per tier, RoomMind persists the
+last valid cost, a rolling two-week range and an observation count
+(`tou_price_history`). If the cost entity drops, nothing goes blind — the
+panel keeps showing the last known price (marked "(last known)"), the
+`roommind_energy_rate` sensor reports it, and a tariff whose tier is derived
+from cost thresholds keeps classifying with it for an hour, long enough to
+ride out a flaky integration but never long enough for a stale price to
+steer your heating.
+
 ### Helpers as an escape hatch
 
 If your tariff source is unreliable — the integration's entity goes

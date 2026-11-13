@@ -121,10 +121,16 @@ export type TouRoomLimits = Partial<Record<keyof TouLimits, number | null>>;
 
 /** Per-tier confirmation data from the bound tariff sources (see
  * TouManager.tier_info): the price the sources know for that tier and the
- * raw period vocabulary that resolves to it. */
+ * raw period vocabulary that resolves to it. Kind marks where the number
+ * came from: live now, provider's next-period price, persisted last known
+ * (source currently down), manual window, or configured cutoff. */
 export interface TouTierInfoTier {
   rate: number | null;
-  kind: "observed" | "window" | "cutoff" | null;
+  kind: "live" | "next" | "last" | "window" | "cutoff" | null;
+  min?: number | null;
+  max?: number | null;
+  count?: number;
+  ts?: number | null;
   names: string[];
   current: boolean;
 }
@@ -133,6 +139,8 @@ export interface TouTierInfo {
   unit: string;
   tiers: Partial<Record<TouTier, TouTierInfoTier>>;
   unmapped: { state: string; count: number }[];
+  current: { tier: TouTier; rate: number; stale: boolean } | null;
+  next: { ts: number; tier: TouTier; rate: number | null; stale: boolean } | null;
 }
 
 /** Which source class answers the current tier ("auto" = legacy cascade). */

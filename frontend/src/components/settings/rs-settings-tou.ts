@@ -152,6 +152,22 @@ export class RsSettingsTou extends LitElement {
         padding: 0 6px;
         margin-left: 4px;
       }
+      .dic-next {
+        font-size: 11px;
+        color: var(--warning-color, #ff9800);
+        border: 1px solid currentColor;
+        border-radius: 8px;
+        padding: 0 6px;
+        margin-left: 4px;
+      }
+      .dic-summary {
+        font-size: 13px;
+        color: var(--primary-text-color);
+        background: rgba(0, 0, 0, 0.04);
+        border-radius: 8px;
+        padding: 6px 10px;
+        margin: 6px 0 2px;
+      }
       .dic-unmapped-title {
         font-weight: 500;
         margin-top: 10px;
@@ -852,13 +868,60 @@ export class RsSettingsTou extends LitElement {
 
   // ---- Tier dictionary: what the bound sources actually feed ----
 
+  private _num(n: number): string {
+    return new Intl.NumberFormat(this.hass.language, { maximumFractionDigits: 4 }).format(n);
+  }
+
   private _rateText(info: TouTierInfoTier | undefined, unit: string, l: string): string {
     if (!info || info.rate == null || info.kind == null) return localize("tou.dic_no_price", l);
-    const n = new Intl.NumberFormat(this.hass.language, { maximumFractionDigits: 4 }).format(
-      info.rate,
-    );
-    const prefix = info.kind === "cutoff" ? "≥ " : "";
-    return `${prefix}${n}${unit ? ` ${unit}` : ""}`;
+    const suffix = unit ? ` ${unit}` : "";
+    // Two or more price points in the rolling window: show the range the
+    // provider actually charges, not a single spot sample.
+    const range =
+      info.count != null &&
+      info.count >= 2 &&
+      info.min != null &&
+      info.max != null &&
+      info.min < info.max
+        ? `${this._num(info.min)}–${this._num(info.max)}${suffix}`
+        : null;
+    const base = range ?? `${this._num(info.rate)}${suffix}`;
+    if (info.kind === "cutoff") return `≥ ${base}`;
+    if (info.kind === "last") return `${base} (${localize("tou.dic_last_known", l)})`;
+    return base;
+  }
+
+  private _clock(ts: number): string {
+    return new Date(ts * 1000).toLocaleTimeString(this.hass.language || undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  /** One line pulling the pertinent future forward: what is active now and
+   * what the sources say is coming, with cost — live reads, last-known
+   * values marked. */
+  private _summaryLine(info: TouTierInfo, l: string) {
+    const parts: string[] = [];
+    if (info.current) {
+      const unit = info.unit ? ` ${info.unit}` : "";
+      const stale = info.current.stale ? ` (${localize("tou.dic_last_known", l)})` : "";
+      parts.push(
+        `${localize("tou.dic_now_label", l)} ${localize(`tou.tier.${info.current.tier}`, l)} · ${this._num(info.current.rate)}${unit}${stale}`,
+      );
+    }
+    if (info.next) {
+      const price =
+        info.next.rate != null
+          ? ` · ${this._num(info.next.rate)}${info.unit ? ` ${info.unit}` : ""}`
+          : "";
+      const stale = info.next.stale ? ` (${localize("tou.dic_last_known", l)})` : "";
+      parts.push(
+        `${localize("tou.dic_next_label", l)} ${localize(`tou.tier.${info.next.tier}`, l)} ${this._clock(info.next.ts)}${price}${stale}`,
+      );
+    }
+    if (parts.length === 0) return nothing;
+    return html`<div class="dic-summary">${parts.join(" — ")}</div>`;
   }
 
   private _assignAlias(state: string, tier: string) {
@@ -880,6 +943,7 @@ export class RsSettingsTou extends LitElement {
     return html`
       <div class="section-label">${localize("tou.dic_title", l)}</div>
       <div class="hint">${localize("tou.dic_hint", l)}</div>
+      ${this._summaryLine(info, l)}
       <div class="dic-rows">${TOU_TIERS.map((t) => this._renderDicRow(t, info, l))}</div>
       ${(info.unmapped ?? []).length > 0 ? this._renderUnmapped(info, l) : nothing}
       <div class="hint">${localize("tou.dic_cutoff_hint", l)}</div>
@@ -891,10 +955,14 @@ export class RsSettingsTou extends LitElement {
     const now = ti?.current
       ? html`<span class="dic-now">${localize("tou.dic_now", l)}</span>`
       : nothing;
+    const next =
+      info.next?.tier === t
+        ? html`<span class="dic-next">${localize("tou.dic_next_badge", l)}</span>`
+        : nothing;
     const chips = (ti?.names ?? []).map((n) => this._renderVocabChip(n, l));
     return html`
       <div class="dic-row">
-        <span class="dic-tier">${localize(`tou.tier.${t}`, l)}${now}</span>
+        <span class="dic-tier">${localize(`tou.tier.${t}`, l)}${now}${next}</span>
         <span class="dic-price">${this._rateText(ti, info.unit, l)}</span>
         <span>${chips}</span>
       </div>

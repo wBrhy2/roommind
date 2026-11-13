@@ -58,7 +58,11 @@ from ..const import (
     DEFAULT_TOU_HEAT_MIN,
     DEFAULT_TOU_STORE_GAP,
     DEFAULT_TOU_SWING,
+    DOMAIN,
     TOU_ARRIVAL_EXPONENT_CAP,
+    TOU_LAST_RATE_TIER_MAX_AGE_S,
+    TOU_PRICE_HISTORY_SAVE_MIN_INTERVAL_S,
+    TOU_PRICE_HISTORY_WINDOW_S,
     TOU_SOURCE_FLAGS,
     TOU_SOURCE_NONE,
     TOU_SOURCE_PERIOD,
@@ -331,11 +335,19 @@ class TouManager:
         self._source_kind: str = TOU_SOURCE_NONE
         self._rate_unit: str = ""
         # Tier-dictionary observations (in-memory, rebuilt as cycles read the
-        # sources): raw period states -> what they mapped to, and the last
-        # rate seen per tier. They feed the settings panel's "tiers as your
-        # source feeds them" block; a restart simply clears them.
+        # sources): raw period states -> what they mapped to. They feed the
+        # settings panel's "tiers as your source feeds them" block; a restart
+        # simply clears them.
         self._observed_states: dict[str, dict[str, Any]] = {}
-        self._observed_rates: dict[str, dict[str, Any]] = {}
+        # Persisted price history per tier (settings["tou_price_history"]): the
+        # last valid cost, a rolling min/max window and a count. Seeded from
+        # settings on the first build and written back (throttled) when values
+        # change, so a provider outage cannot blind the panel — or the rate
+        # tier fallback.
+        self._price_history: dict[str, dict[str, Any]] = {}
+        self._history_loaded = False
+        self._history_dirty = False
+        self._history_saved = 0.0
 
     @property
     def timeline(self) -> TouTimeline | None:
@@ -364,6 +376,7 @@ class TouManager:
         now = time.time()
         horizon = now + TOU_TIMELINE_HORIZON_MINUTES * 60.0
 
+        self._load_price_history(settings)
         current, rate, unit, source = self._resolve_current_tier(settings)
         self._source_kind = source
         self._rate_unit = unit
@@ -393,6 +406,7 @@ class TouManager:
         segments = self._paint_segments(now, horizon, current, events)
         timeline = TouTimeline(segments, current_tier=current, current_rate=rate)
         self._timeline = timeline
+        await self._async_persist_history()
         return timeline
 
     def _resolve_current_tier(self, settings: dict[str, Any]) -> tuple[str, float | None, str, str]:
@@ -412,7 +426,13 @@ class TouManager:
                 self._observe_period_state(state.state, tier)
                 if tier != TOU_TIER_UNKNOWN:
                     rate, unit = self._read_rate(settings)
-                    self._observe_rate(tier, rate, unit)
+                    if rate is None:
+                        # Cost gone: keep showing/using the last valid price.
+                        found = self._last_rate_for_tier(tier)
+                        if found is not None:
+                            rate, unit = found[0], found[1]
+                    else:
+                        self._observe_rate(tier, rate, unit)
                     return tier, rate, unit, TOU_SOURCE_PERIOD
 
         flags = settings.get("tou_flag_entities") or {}
@@ -423,13 +443,27 @@ class TouManager:
                 state = self.hass.states.get(entity_id)
                 if state is not None and state.state == "on":
                     rate, unit = self._read_rate(settings)
-                    self._observe_rate(str(tier), rate, unit)
+                    if rate is None:
+                        found = self._last_rate_for_tier(str(tier))
+                        if found is not None:
+                            rate, unit = found[0], found[1]
+                    else:
+                        self._observe_rate(str(tier), rate, unit)
                     return str(tier), rate, unit, TOU_SOURCE_FLAGS
 
         rate, unit = self._read_rate(settings)
         if mode not in ("auto", "rate"):
             return TOU_TIER_UNKNOWN, rate, unit, TOU_SOURCE_NONE
         tier = self._tier_from_rate(rate, settings)
+        if tier == TOU_TIER_UNKNOWN and rate is None:
+            # Provider blip: keep classifying from the last valid price while
+            # it is fresh; beyond the grace window the tariff stays unknown and
+            # shapes nothing — a stale price must not guess a tier.
+            found = self._last_known_rate(TOU_LAST_RATE_TIER_MAX_AGE_S)
+            if found is not None:
+                guessed = self._tier_from_rate(found[0], settings)
+                if guessed != TOU_TIER_UNKNOWN:
+                    return guessed, found[0], found[1], TOU_SOURCE_RATE
         if tier != TOU_TIER_UNKNOWN:
             self._observe_rate(tier, rate, unit)
             return tier, rate, unit, TOU_SOURCE_RATE
@@ -466,19 +500,90 @@ class TouManager:
             self._observed_states.pop(oldest, None)
 
     def _observe_rate(self, tier: str, rate: float | None, unit: str) -> None:
-        """Remember the last rate seen while the tariff sat in *tier*."""
+        """Record a valid cost observation for *tier* (persisted history)."""
         if rate is None or tier in (TOU_TIER_UNKNOWN, ""):
             return
-        self._observed_rates[str(tier)] = {"rate": rate, "unit": unit, "ts": time.time()}
+        now = time.time()
+        entry = self._price_history.get(str(tier))
+        if not isinstance(entry, dict) or now - float(entry.get("ts", 0.0)) > TOU_PRICE_HISTORY_WINDOW_S:
+            # First observation, or the rolling window expired (seasons move
+            # prices): start fresh so min/max stay representative.
+            self._price_history[str(tier)] = {
+                "rate": rate,
+                "unit": unit,
+                "ts": now,
+                "count": 1,
+                "min": rate,
+                "max": rate,
+            }
+        else:
+            entry["rate"] = rate
+            entry["unit"] = unit or entry.get("unit", "")
+            entry["ts"] = now
+            entry["count"] = int(entry.get("count", 0)) + 1
+            entry["min"] = min(float(entry.get("min", rate)), rate)
+            entry["max"] = max(float(entry.get("max", rate)), rate)
+        self._history_dirty = True
+
+    def _load_price_history(self, settings: dict[str, Any]) -> None:
+        """Seed the in-memory history from persisted settings once per process."""
+        if self._history_loaded:
+            return
+        self._history_loaded = True
+        raw = settings.get("tou_price_history")
+        if not isinstance(raw, dict):
+            return
+        for tier in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
+            entry = raw.get(tier)
+            if isinstance(entry, dict) and isinstance(entry.get("rate"), (int, float)):
+                self._price_history[tier] = dict(entry)
+
+    async def _async_persist_history(self) -> None:
+        """Write the price history back, throttled; keeps the dirty flag."""
+        if not self._history_dirty:
+            return
+        now = time.time()
+        if now - self._history_saved < TOU_PRICE_HISTORY_SAVE_MIN_INTERVAL_S:
+            return
+        data = getattr(self.hass, "data", None)
+        if not isinstance(data, dict):  # harness without a real hass.data: nothing to persist
+            return
+        store = data.get(DOMAIN, {}).get("store")
+        if store is None:
+            return
+        await store.async_save_settings({"tou_price_history": self._price_history})
+        self._history_saved = now
+        self._history_dirty = False
+
+    def _last_rate_for_tier(self, tier: str, max_age: float | None = None) -> tuple[float, str, float] | None:
+        """(rate, unit, ts) of the last valid cost seen in *tier*, if in age."""
+        entry = self._price_history.get(tier)
+        if not isinstance(entry, dict) or not isinstance(entry.get("rate"), (int, float)):
+            return None
+        ts = float(entry.get("ts", 0.0))
+        if max_age is not None and time.time() - ts > max_age:
+            return None
+        return float(entry["rate"]), str(entry.get("unit", "")), ts
+
+    def _last_known_rate(self, max_age: float | None = None) -> tuple[float, str, float] | None:
+        """The freshest valid cost across all tiers (fallback when the source died)."""
+        best: tuple[float, str, float] | None = None
+        for tier in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
+            found = self._last_rate_for_tier(tier, max_age)
+            if found is not None and (best is None or found[2] > best[2]):
+                best = found
+        return best
 
     def tier_info(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """The tariff as the bound sources actually feed it.
+        """The tariff as the bound sources feed it, pulled at view time.
 
-        Per tier: a price (last observed rate → manual-window rate → cost
-        threshold cutoff, with the kind so the UI can say "≥" honestly), the
-        raw vocabulary that resolves to it, and whether it is active now —
-        plus every period string the sources fed that nothing could map.
-        This is the settings panel's "does this match my bill?" block.
+        Per tier: a price — preferring the live cost sensor (current tier) and
+        the provider's next-period price sensor, then the persisted last-known
+        value, then the manual-window rate, then the configured threshold
+        cutoff (kind-marked, so a cutoff never masquerades as a reading) — and
+        the raw period vocabulary that resolves to it. A ``current`` and a
+        ``next`` block say what is active and what is coming, with cost,
+        without waiting for cycles to observe it.
         """
         window_rate: dict[str, float] = {}
         for row in settings.get("tou_rate_windows") or []:
@@ -494,30 +599,79 @@ class TouManager:
             TOU_TIER_MID: settings.get("tou_mid_threshold"),
             TOU_TIER_ULTRA_LOW: settings.get("tou_ultra_threshold"),
         }
+        # Panel can open before the first cycle ran (or right after a restart):
+        # seed from persisted history so the dictionary is never needlessly blank.
+        self._load_price_history(settings)
         current = self._timeline.current_tier if self._timeline else TOU_TIER_UNKNOWN
+        next_ts, next_tier = (
+            self._next_change_from_timeline(self._timeline) if self._timeline is not None else (None, None)
+        )
+        # Pull, don't recall: read the bound entities fresh on every view.
+        live_rate, live_unit = self._read_rate(settings)
+        if not live_unit:
+            any_last = self._last_known_rate()
+            live_unit = any_last[1] if any_last else ""
+        next_rate: float | None = None
+        next_stale = False
+        if next_tier:
+            next_rate = self._read_float_state(str(settings.get("tou_next_rate_entity") or ""))
+            if next_rate is None:
+                found = self._last_rate_for_tier(str(next_tier))
+                if found is not None:
+                    next_rate, next_stale = found[0], True
         raw_aliases = settings.get("tou_period_aliases")
         aliases: dict[str, Any] = raw_aliases if isinstance(raw_aliases, dict) else {}
         tiers: dict[str, Any] = {}
         for tier in (TOU_TIER_PEAK, TOU_TIER_MID, TOU_TIER_OFF, TOU_TIER_ULTRA_LOW):
-            observed = self._observed_rates.get(tier)
+            hist = self._price_history.get(tier)
             rate_out: float | None = None
             kind: str | None = None
-            if observed is not None:
-                rate_out, kind = float(observed["rate"]), "observed"
+            if tier == current and live_rate is not None:
+                rate_out, kind = live_rate, "live"
+            elif tier == next_tier and next_rate is not None:
+                rate_out, kind = next_rate, "next"
+            elif isinstance(hist, dict) and isinstance(hist.get("rate"), (int, float)):
+                rate_out, kind = float(hist["rate"]), "last"
             elif tier in window_rate:
                 rate_out, kind = window_rate[tier], "window"
             elif isinstance(cutoff.get(tier), (int, float)):
                 rate_out, kind = float(cutoff[tier]), "cutoff"
             names = sorted(state for state, v in self._observed_states.items() if v.get("tier") == tier)
             names += [str(a) for a, t in aliases.items() if t == tier and str(a) not in names]
-            tiers[tier] = {"rate": rate_out, "kind": kind, "names": names[:8], "current": tier == current}
+            tiers[tier] = {
+                "rate": rate_out,
+                "kind": kind,
+                "min": hist.get("min") if isinstance(hist, dict) else None,
+                "max": hist.get("max") if isinstance(hist, dict) else None,
+                "count": hist.get("count", 0) if isinstance(hist, dict) else 0,
+                "ts": hist.get("ts") if isinstance(hist, dict) else None,
+                "names": names[:8],
+                "current": tier == current,
+            }
+        current_block: dict[str, Any] | None = None
+        if current in tiers:
+            rate_c: float | None = live_rate
+            if rate_c is None:
+                found_c = self._last_rate_for_tier(current)
+                rate_c = found_c[0] if found_c else None
+            if rate_c is not None:
+                current_block = {"tier": current, "rate": rate_c, "stale": live_rate is None}
+        next_block: dict[str, Any] | None = None
+        if next_ts is not None and next_tier in tiers:
+            next_block = {"ts": round(next_ts, 1), "tier": str(next_tier), "rate": next_rate, "stale": next_stale}
         observed_unmapped: list[dict[str, int | str]] = [
             {"state": state, "count": int(v.get("count", 0))}
             for state, v in self._observed_states.items()
             if v.get("tier") == TOU_TIER_UNKNOWN
         ]
         observed_unmapped.sort(key=lambda e: -int(e["count"]))
-        return {"unit": self._rate_unit, "tiers": tiers, "unmapped": observed_unmapped[:16]}
+        return {
+            "unit": self._rate_unit or live_unit,
+            "tiers": tiers,
+            "unmapped": observed_unmapped[:16],
+            "current": current_block,
+            "next": next_block,
+        }
 
     def _read_rate(self, settings: dict[str, Any]) -> tuple[float | None, str]:
         entity_id = str(settings.get("tou_rate_entity") or "")
@@ -758,10 +912,19 @@ class TouManager:
         if timeline is None:
             return {"enabled": False, "tier": TOU_TIER_UNKNOWN, "rate": None, "rate_unit": self._rate_unit}
         next_ts, next_tier = self._next_change_from_timeline(timeline)
+        rate = timeline.current_rate
+        rate_stale = False
+        if rate is None:
+            # Keep going with the last known valid value rather than blanking
+            # the sensors when the provider integration drops.
+            found = self._last_known_rate()
+            if found is not None:
+                rate, rate_stale = found[0], True
         return {
             "enabled": True,
             "tier": timeline.current_tier,
-            "rate": timeline.current_rate,
+            "rate": rate,
+            "rate_stale": rate_stale,
             "rate_unit": self._rate_unit,
             "source": self._source_kind,
             "next_change": next_ts,

@@ -10,6 +10,7 @@ import pytest
 from homeassistant.util import dt as dt_util
 
 from custom_components.roommind.const import (
+    DOMAIN,
     TOU_SOURCE_PERIOD,
     TOU_TIER_MID,
     TOU_TIER_OFF,
@@ -37,6 +38,12 @@ def _make_hass(states: dict[str, str]) -> MagicMock:
         entity_states[eid] = s
     hass.states.get = MagicMock(side_effect=entity_states.get)
     hass.services.async_call = AsyncMock(return_value=None)
+    # Manager code may await through hass.data (e.g. price-history persistence);
+    # a bare MagicMock store attribute would blow up on await. Mirror the real
+    # contract: an awaitable save, no recorded expectations unless a test wants them.
+    store = MagicMock()
+    store.async_save_settings = AsyncMock()
+    hass.data = {DOMAIN: {"store": store}}
     return hass
 
 
@@ -127,7 +134,7 @@ async def test_tier_info_observes_names_rates_and_unmapped() -> None:
     info = mgr.tier_info(settings)
     peak = info["tiers"][TOU_TIER_PEAK]
     assert peak["current"] is True
-    assert peak["rate"] == 0.337 and peak["kind"] == "observed"
+    assert peak["rate"] == 0.337 and peak["kind"] == "live"
     assert "ulo_on_peak" in peak["names"]
     assert info["tiers"][TOU_TIER_OFF]["rate"] is None
     assert info["unmapped"] == []
@@ -157,6 +164,102 @@ def test_tier_info_falls_back_to_windows_and_cutoffs() -> None:
     assert info["tiers"][TOU_TIER_MID]["rate"] == 0.15
     assert info["tiers"][TOU_TIER_MID]["kind"] == "cutoff"
     assert info["tiers"][TOU_TIER_OFF]["rate"] is None  # between: no number to show
+
+
+@pytest.mark.asyncio
+async def test_cost_outage_keeps_running_on_the_last_known_value() -> None:
+    """Rate source: a provider blip must not blind tariff shaping — the tier
+    and the price fall back to the last valid cost while it is fresh."""
+    hass = MagicMock()
+    entity_states: dict = {}
+
+    def _set(eid: str, value: str) -> None:
+        s = MagicMock()
+        s.state = value
+        s.attributes = {"unit_of_measurement": "CAD/kWh"}
+        entity_states[eid] = s
+
+    hass.states.get = MagicMock(side_effect=entity_states.get)
+    settings = {
+        "tou_enabled": True,
+        "tou_rate_entity": "sensor.rate",
+        "tou_peak_threshold": 0.3,
+        "tou_mid_threshold": 0.15,
+        "tou_ultra_threshold": 0.02,
+    }
+    _set("sensor.rate", "0.42")
+    mgr = TouManager(hass)
+    timeline = await mgr.async_build_timeline(settings)
+    assert timeline is not None and timeline.current_tier == TOU_TIER_PEAK
+
+    _set("sensor.rate", "unavailable")
+    timeline2 = await mgr.async_build_timeline(settings)
+    assert timeline2 is not None
+    assert timeline2.current_tier == TOU_TIER_PEAK  # shaped off the last valid price
+    assert timeline2.current_rate == 0.42
+    info = mgr.tier_info(settings)
+    assert info["current"] == {"tier": TOU_TIER_PEAK, "rate": 0.42, "stale": True}
+
+
+@pytest.mark.asyncio
+async def test_price_history_persists_and_seeds_restart() -> None:
+    """Observations write back (throttled) and a fresh manager reads them."""
+    hass = _make_hass({"sensor.rate": "0.42"})
+    store = MagicMock()
+    store.async_save_settings = AsyncMock()
+    hass.data = {"roommind": {"store": store}}
+    settings = {
+        "tou_enabled": True,
+        "tou_rate_entity": "sensor.rate",
+        "tou_peak_threshold": 0.3,
+        "tou_mid_threshold": 0.15,
+        "tou_ultra_threshold": 0.02,
+    }
+    mgr = TouManager(hass)
+    await mgr.async_build_timeline(settings)
+    store.async_save_settings.assert_called_once()
+    persisted = store.async_save_settings.call_args[0][0]["tou_price_history"]
+    assert persisted[TOU_TIER_PEAK]["rate"] == 0.42
+    assert persisted[TOU_TIER_PEAK]["count"] == 1
+
+    # Restart: no live rate anywhere, but the persisted history answers.
+    mgr2 = TouManager(_make_hass({}))
+    info2 = mgr2.tier_info({"tou_price_history": persisted})
+    peak = info2["tiers"][TOU_TIER_PEAK]
+    assert peak["rate"] == 0.42 and peak["kind"] == "last"
+
+
+@pytest.mark.asyncio
+async def test_tier_info_pulls_next_period_with_cost() -> None:
+    """Next-change + next-rate sensors are read on view: the panel sees the
+    upcoming period and its provider-published price before it starts."""
+    next_ts = time.time() + 7200.0
+    hass = _make_hass(
+        {
+            "sensor.period": "ulo_off_peak",
+            "sensor.next_change": dt_util.utc_from_timestamp(next_ts).isoformat(),
+            "sensor.next_rate": "0.45",
+        }
+    )
+    settings = {
+        "tou_enabled": True,
+        "tou_period_entity": "sensor.period",
+        "tou_next_change_entity": "sensor.next_change",
+        "tou_next_rate_entity": "sensor.next_rate",
+        "tou_lookahead": "next_change",
+        "tou_next_change_tier": TOU_TIER_PEAK,
+        "tou_peak_threshold": 0.3,
+        "tou_mid_threshold": 0.15,
+        "tou_ultra_threshold": 0.02,
+    }
+    mgr = TouManager(hass)
+    assert await mgr.async_build_timeline(settings) is not None
+    info = mgr.tier_info(settings)
+    assert info["next"] is not None
+    assert info["next"]["tier"] == TOU_TIER_PEAK
+    assert info["next"]["rate"] == 0.45 and info["next"]["stale"] is False
+    assert info["tiers"][TOU_TIER_PEAK]["kind"] == "next"
+    assert info["tiers"][TOU_TIER_OFF]["current"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -437,11 +540,16 @@ async def test_lookahead_next_change_rate() -> None:
 
 
 def test_rate_window_events_and_guards() -> None:
-    """Manual tariff rows paint tier events; inert input is ignored, never guessed."""
+    """Manual tariff rows paint tier events; inert input is ignored, never guessed.
+
+    Horizon is 48 h, not the runtime's 16 h: the midnight-wrap case must find its
+    next 23:00 occurrence at any wall-clock test time (16 h only covers it from
+    ~07:00 onwards, making the assertion flaky outside that window).
+    """
     from homeassistant.util import dt as dt_util
 
     now = time.time()
-    horizon = now + 16 * 3600.0
+    horizon = now + 48 * 3600.0
     mgr = TouManager(_make_hass({}))
 
     # end == start wraps a full 24 h, so the window always covers "now".

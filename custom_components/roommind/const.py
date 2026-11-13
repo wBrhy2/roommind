@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "1.9.0-beta.16"
+VERSION = "1.9.0-beta.17"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -306,6 +306,18 @@ TOU_ARRIVAL_EXPONENT_CAP = 3.0
 # Learned-model confidence below which "arrive" rows hold the flat temperature
 # (today's coast behavior) instead of deriving a boundary temperature.
 TOU_ARRIVAL_MIN_CONFIDENCE = 0.5
+
+# Grace window for classifying the tier from the LAST KNOWN valid cost when the
+# cost sensor itself is momentarily gone: a flaky provider integration must not
+# silently blind tariff shaping, but a stale price must not guess a tier either.
+# Display falls back to the last known price far longer than this does.
+TOU_LAST_RATE_TIER_MAX_AGE_S = 3600.0
+# Rolling window for the per-tier price history min/max; an observation past
+# the window starts a fresh one (seasons change prices; ranges must follow).
+TOU_PRICE_HISTORY_WINDOW_S = 14 * 24 * 3600.0
+# Minimum spacing between price-history store writes (observations are every
+# cycle; the write only matters on values, not ticks).
+TOU_PRICE_HISTORY_SAVE_MIN_INTERVAL_S = 60.0
 
 
 # Room-level user schedule blocks (chain step 3): time-of-day overrides that
