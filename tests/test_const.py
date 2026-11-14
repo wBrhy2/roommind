@@ -2,13 +2,38 @@
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 
+from custom_components.roommind import const as const_module
 from custom_components.roommind.const import (
+    VERSION,
     build_override_live,
     is_override_active,
     is_override_suppressed,
 )
+
+
+class TestVersionLockstep:
+    """const.VERSION and manifest.json must always agree.
+
+    The boot check in _async_check_version_mismatch compares the in-memory
+    const.VERSION against the on-disk manifest to offer a "restart required"
+    repair after a hot file deploy. A release that bumps only one of the two
+    makes the pair disagree *forever* — the repair is recreated every boot and
+    no restart can ever converge it (both values are baked into the deployed
+    files). That loop shipped on beta.18 through beta.21; this test is the
+    fence.
+    """
+
+    def test_version_matches_manifest(self):
+        manifest_path = Path(const_module.__file__).parent / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["version"] == VERSION, (
+            f"bump custom_components/roommind/const.py VERSION ({VERSION}) together "
+            f"with manifest.json version ({manifest['version']})"
+        )
 
 
 class TestIsOverrideActive:
