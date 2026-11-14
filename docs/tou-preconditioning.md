@@ -367,9 +367,13 @@ RoomMind** — no HA helper to create by hand first:
   heat/cool/both, and a target — a fixed temperature, a delta, or the room's
   own **Comfort**/**Eco** value. No days selected means every day; an end
   before the start runs past midnight.
-- **Base schedules** (`schedules_lib`) are the reusable version: named block
-  lists scoped to the house or a floor. Each room **opts in explicitly** —
-  bind the schedules it should follow, in the room's own card.
+- **Shared schedules** (`schedules_lib`) are the reusable version: each
+  schedule picks its scope in the **Applies to** dropdown — **Room**,
+  **House** or a specific **Floor** — and the room card shows all of them in
+  one list. Choosing Room moves the blocks into the room (and retires the
+  shared copy); choosing House or Floor publishes the room's own blocks as a
+  shared schedule and binds this room to it. Other rooms **opt in explicitly**
+  with the bind checkbox on each row.
 - **Precedence:** the room's own blocks outrank every bound base schedule
   (a house schedule steers all its binders, but a room can always overrule
   it); both outrank tariff shaping, which in turn steers around the plain

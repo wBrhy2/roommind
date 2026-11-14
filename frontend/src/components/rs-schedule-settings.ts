@@ -9,6 +9,7 @@ import type {
   BaseScheduleRef,
 } from "../types";
 import { localize } from "../utils/localize";
+import { getSelectValue } from "../utils/events";
 import "./settings/rs-schedule-blocks";
 import {
   formatTemp,
@@ -65,6 +66,7 @@ export class RsScheduleSettings extends RsScheduleBase {
   /** Working copy of the library while a save round-trip is in flight. */
   @state() private _lib: BaseSchedule[] | null = null;
   @state() private _expandedSchedule: string | null = null;
+  @state() private _roomExpanded = false;
 
   protected willUpdate(changed: PropertyValues) {
     // A fresh library from the server wins over the working copy once any
@@ -78,8 +80,6 @@ export class RsScheduleSettings extends RsScheduleBase {
     return this._lib ?? this.baseLibrary ?? [];
   }
 
-  private _synced = false;
-
   private _isBound(id: string): boolean {
     return (this.baseSchedules ?? []).some((r) => r.id === id);
   }
@@ -88,6 +88,39 @@ export class RsScheduleSettings extends RsScheduleBase {
     RsScheduleBase.sharedStyles,
     inputStyles,
     css`
+      .sub-title {
+        margin-top: 16px;
+        font-weight: 500;
+      }
+      .base-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 6px 0;
+      }
+      .base-row ha-select {
+        min-width: 104px;
+      }
+      .base-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .base-scope {
+        color: var(--secondary-text-color);
+        font-size: 12px;
+      }
+      .base-editor {
+        margin: 4px 0 10px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .base-add {
+        margin-top: 4px;
+      }
       .fallback-hint {
         font-size: 11px;
         color: var(--secondary-text-color);
@@ -264,7 +297,7 @@ export class RsScheduleSettings extends RsScheduleBase {
       ${
         (this.baseSchedules ?? []).length > 0 || (this.scheduleBlocks ?? []).length > 0
           ? html`<div class="view-selector-info">
-              ${localize("schedule.bases_title", l)}:
+              ${localize("schedule.schedules_title", l)}:
               ${
                 this._library
                   .filter((s) => this._isBound(s.id))
@@ -274,7 +307,7 @@ export class RsScheduleSettings extends RsScheduleBase {
               ${
                 (this.scheduleBlocks ?? []).length > 0
                   ? html` · ${(this.scheduleBlocks ?? []).length}
-                    ${localize("schedule.rooms_title", l)}`
+                    ${localize("schedule.scope_this_room", l)}`
                   : nothing
               }
             </div>`
@@ -329,19 +362,11 @@ export class RsScheduleSettings extends RsScheduleBase {
             ></rs-toggle-row>`
           : nothing
       }
-      ${this._renderBaseSection(l)} ${this._renderRoomBlocksSection(l)}
+      ${this._renderSchedulesSection(l)}
     `;
   }
 
   // ─── Base schedules (shared house/floor block lists) ─────────────
-
-  private _scopeLabel(entry: BaseSchedule, l: string): string {
-    if (entry.scope !== "floor") return localize("schedule.base_scope_house", l);
-    const floors =
-      (this.hass as unknown as { floors?: Record<string, { name?: string }> }).floors ?? {};
-    const floor = entry.floor_id ? floors[entry.floor_id] : undefined;
-    return floor?.name ?? localize("schedule.base_scope_floor", l);
-  }
 
   private _newLibId(): string {
     return `sched-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -351,6 +376,43 @@ export class RsScheduleSettings extends RsScheduleBase {
     this.dispatchEvent(
       new CustomEvent("base-schedules-changed", { detail: refs, bubbles: true, composed: true }),
     );
+  }
+
+  private _dispatchBlocks(blocks: ScheduleBlock[]) {
+    this.dispatchEvent(
+      new CustomEvent("schedule-blocks-changed", { detail: blocks, bubbles: true, composed: true }),
+    );
+  }
+
+  private _newRoomId(): string {
+    return `blk-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  /** Make a shared schedule local: its blocks join this room's own list and
+   * the library entry goes away — every other binder loses it with it, which
+   * is the honest meaning of "room only". */
+  private _moveToRoom(entry: BaseSchedule) {
+    this._dispatchBlocks([...(this.scheduleBlocks ?? []), ...(entry.blocks ?? [])]);
+    this._deleteSchedule(entry.id);
+    if (this._expandedSchedule === entry.id) this._expandedSchedule = entry.id;
+  }
+
+  /** Make this room's blocks shared: a new house/floor schedule carries them,
+   * this room binds it, the local list empties. */
+  private _shareRoom(scope: "house" | "floor") {
+    const l = this.hass.language;
+    const blocks = (this.scheduleBlocks ?? []).map((b) => ({ ...b, id: this._newRoomId() }));
+    const entry: BaseSchedule = {
+      id: this._newLibId(),
+      name: localize("schedule.moved_name", l),
+      scope,
+      floor_id: "",
+      blocks,
+    };
+    void this._saveLib([...this._library, entry]);
+    this._dispatchBindings([...(this.baseSchedules ?? []), { id: entry.id, enabled: true }]);
+    this._dispatchBlocks([]);
+    this._expandedSchedule = entry.id;
   }
 
   private _toggleBind(id: string) {
@@ -403,11 +465,63 @@ export class RsScheduleSettings extends RsScheduleBase {
     void this._saveLib(this._library.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }
 
-  private _renderBaseSection(l: string) {
+  /** One list of schedules; the "Applies to" dropdown is the only creation
+   * concept: Room keeps the blocks in this room, House/Floor publishes them
+   * to the shared library every opt-in room follows. Switching a scope
+   * moves the blocks between the two storages — there is no separate
+   * "base schedule" vs "room blocks" affordance anymore. */
+  private _renderSchedulesSection(l: string) {
     const library = this._library;
+    const roomBlocks = this.scheduleBlocks ?? [];
+    const roomCount = roomBlocks.length;
     return html`
-      <div class="sub-title">${localize("schedule.bases_title", l)}</div>
-      <div class="fallback-hint">${localize("schedule.bases_hint", l)}</div>
+      <div class="sub-title">${localize("schedule.schedules_title", l)}</div>
+      <div class="fallback-hint">${localize("schedule.schedules_hint", l)}</div>
+
+      <div class="base-row">
+        <ha-select
+          .options=${[
+            { value: "room", label: localize("schedule.base_scope_room", l) },
+            { value: "house", label: localize("schedule.base_scope_house", l) },
+            { value: "floor", label: localize("schedule.base_scope_floor", l) },
+          ]}
+          .value=${"room"}
+          @selected=${(e: Event) => {
+            const v = getSelectValue(e);
+            if (v === "house" || v === "floor") this._shareRoom(v);
+          }}
+          @closed=${(e: Event) => e.stopPropagation()}
+          fixedMenuPosition
+        ></ha-select>
+        <span class="base-name">${localize("schedule.scope_this_room", l)}</span>
+        <span class="base-scope">
+          ${roomCount}
+          ${
+            roomCount === 1
+              ? localize("schedule.block_count_one", l)
+              : localize("schedule.block_count", l)
+          }
+        </span>
+        <ha-icon-button
+          .path=${this._roomExpanded ? ICON_COLLAPSE : ICON_EXPAND}
+          @click=${() => (this._roomExpanded = !this._roomExpanded)}
+          .label=${localize("schedule.base_edit", l)}
+        ></ha-icon-button>
+      </div>
+      ${
+        this._roomExpanded
+          ? html`<div class="base-editor">
+              <rs-schedule-blocks
+                .hass=${this.hass}
+                .blocks=${roomBlocks}
+                @blocks-changed=${(e: CustomEvent<ScheduleBlock[]>) => {
+                  e.stopPropagation();
+                  this._dispatchBlocks(e.detail);
+                }}
+              ></rs-schedule-blocks>
+            </div>`
+          : nothing
+      }
       ${library.map((entry) => {
         const expanded = this._expandedSchedule === entry.id;
         return html`
@@ -417,8 +531,23 @@ export class RsScheduleSettings extends RsScheduleBase {
               @checked-changed=${() => this._toggleBind(entry.id)}
               .label=${localize("schedule.base_bind", l)}
             ></ha-checkbox>
+            <ha-select
+              .options=${[
+                { value: "room", label: localize("schedule.base_scope_room", l) },
+                { value: "house", label: localize("schedule.base_scope_house", l) },
+                { value: "floor", label: localize("schedule.base_scope_floor", l) },
+              ]}
+              .value=${entry.scope}
+              @selected=${(e: Event) => {
+                const v = getSelectValue(e);
+                if (v === "room") this._moveToRoom(entry);
+                else if (v === "house" || v === "floor")
+                  this._updateSchedule(entry.id, { scope: v });
+              }}
+              @closed=${(e: Event) => e.stopPropagation()}
+              fixedMenuPosition
+            ></ha-select>
             <span class="base-name">${entry.name}</span>
-            <span class="base-scope">${this._scopeLabel(entry, l)}</span>
             <ha-icon-button
               .path=${expanded ? ICON_COLLAPSE : ICON_EXPAND}
               @click=${() => (this._expandedSchedule = expanded ? null : entry.id)}
@@ -436,21 +565,21 @@ export class RsScheduleSettings extends RsScheduleBase {
                         name: (e.target as HTMLInputElement).value.trim() || entry.name,
                       })}
                   ></ha-textfield>
-                  <ha-select
-                    .label=${localize("schedule.base_scope", l)}
-                    .value=${entry.scope}
-                    .options=${[
-                      { value: "house", label: localize("schedule.base_scope_house", l) },
-                      { value: "floor", label: localize("schedule.base_scope_floor", l) },
-                    ]}
-                    @selected=${(e: Event) => {
-                      const v = (e.target as HTMLElement & { value?: string }).value;
-                      if (v === "house" || v === "floor")
-                        this._updateSchedule(entry.id, { scope: v });
-                    }}
-                    @closed=${(e: Event) => e.stopPropagation()}
-                    fixedMenuPosition
-                  ></ha-select>
+                  ${
+                    entry.scope === "floor"
+                      ? html`<ha-select
+                          .label=${localize("schedule.base_floor", l)}
+                          .value=${entry.floor_id ?? ""}
+                          .options=${this._floorOptions()}
+                          @selected=${(e: Event) => {
+                            const v = getSelectValue(e);
+                            if (v !== null) this._updateSchedule(entry.id, { floor_id: v });
+                          }}
+                          @closed=${(e: Event) => e.stopPropagation()}
+                          fixedMenuPosition
+                        ></ha-select>`
+                      : nothing
+                  }
                   <rs-schedule-blocks
                     .hass=${this.hass}
                     .blocks=${entry.blocks}
@@ -468,29 +597,17 @@ export class RsScheduleSettings extends RsScheduleBase {
         `;
       })}
       <ha-button class="base-add" @click=${this._createSchedule}>
-        + ${localize("schedule.base_new", l)}
+        + ${localize("schedule.add", l)}
       </ha-button>
     `;
   }
 
-  private _renderRoomBlocksSection(l: string) {
-    return html`
-      <div class="sub-title">${localize("schedule.rooms_title", l)}</div>
-      <rs-schedule-blocks
-        .hass=${this.hass}
-        .blocks=${this.scheduleBlocks ?? []}
-        @blocks-changed=${(e: CustomEvent<ScheduleBlock[]>) => {
-          e.stopPropagation();
-          this.dispatchEvent(
-            new CustomEvent("schedule-blocks-changed", {
-              detail: e.detail,
-              bubbles: true,
-              composed: true,
-            }),
-          );
-        }}
-      ></rs-schedule-blocks>
-    `;
+  private _floorOptions(): { value: string; label: string }[] {
+    const floors =
+      (this.hass as unknown as { floors?: Record<string, { name?: string }> }).floors ?? {};
+    return Object.entries(floors)
+      .map(([id, f]) => ({ value: id, label: f?.name ?? id }))
+      .sort((a, b) => a.label.localeCompare(b.label));
   }
 
   private _onPreheatToggle(e: CustomEvent<boolean>) {
