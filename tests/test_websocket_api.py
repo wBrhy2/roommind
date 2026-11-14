@@ -101,6 +101,7 @@ async def test_list_rooms_empty(ws_hass, store, connection):
             "compressor_groups": [],
             "tou_rules": [],
             "schedules_lib": [],
+            "tou_extra_tiers": [],
             "tou_limits": {
                 "heat_min": 17.0,
                 "heat_max": 28.0,
@@ -3637,6 +3638,66 @@ async def test_save_settings_tou_rules_named_values(ws_hass, store, connection):
         "tou_rules": [{**msg["tou_rules"][0], "id": "r-bad", "name": "nope", "action": "lower", "heat": "eco"}],
     }
     await _save_settings(ws_hass, connection, bad)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_rule"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_extra_tiers(ws_hass, store, connection):
+    """The extra-tier registry validates ids, sensing and rule anchors."""
+    await store.async_load()
+    gen = {
+        "id": "gen",
+        "name": "Generator",
+        "entity_id": "sensor.generac_status",
+        "kind": "state",
+        "states": ["Running"],
+        "for_seconds": 300,
+        "cost": 0.42,
+        "unit": "CAD/kWh",
+        "enabled": True,
+    }
+    rule = {
+        "id": "shed",
+        "name": "shed during gen",
+        "tier": "gen",
+        "edge": "start",
+        "action": "set",
+        "heat": "eco",
+        "until": "tier_window",
+    }
+    ok = {"id": 98, "type": "roommind/settings/save", "tou_extra_tiers": [gen], "tou_rules": [rule]}
+    await _save_settings(ws_hass, connection, ok)
+    connection.send_result.assert_called_once()
+    assert store.get_settings()["tou_extra_tiers"][0]["id"] == "gen"
+    assert store.get_settings()["tou_rules"][0]["tier"] == "gen"
+
+    # Reserved ids (the grid four) are rejected.
+    connection.send_result.reset_mock()
+    connection.send_error.reset_mock()
+    bad = {"id": 99, "type": "roommind/settings/save", "tou_extra_tiers": [{**gen, "id": "peak", "name": "no"}]}
+    await _save_settings(ws_hass, connection, bad)
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_tou_extra_tier"
+
+    # State activation without states is incoherent.
+    connection.send_error.reset_mock()
+    bad2 = {
+        "id": 100,
+        "type": "roommind/settings/save",
+        "tou_extra_tiers": [{**gen, "id": "gen2", "states": []}],
+    }
+    await _save_settings(ws_hass, connection, bad2)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_extra_tier"
+
+    # A rule anchored on an unregistered tier is rejected (registry survives
+    # from the earlier save; "solar" was never added to it).
+    connection.send_error.reset_mock()
+    bad3 = {
+        "id": 101,
+        "type": "roommind/settings/save",
+        "tou_rules": [{**rule, "id": "ghost", "name": "ghost anchor", "tier": "solar"}],
+    }
+    await _save_settings(ws_hass, connection, bad3)
     assert connection.send_error.call_args[0][1] == "invalid_tou_rule"
 
 

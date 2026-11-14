@@ -9,6 +9,7 @@ import type {
   TouRule,
   TouTierInfo,
   BaseSchedule,
+  TouExtraTier,
 } from "./types";
 
 import { getEntitiesForArea } from "./utils/room-state";
@@ -71,6 +72,8 @@ export class RoomMindPanel extends LitElement {
   @state() private _touRules: TouRule[] = [];
   /** Shared base-schedule library (settings.schedules_lib) for room schedule sections. */
   @state() private _schedulesLib: BaseSchedule[] = [];
+  /** Extra tariff tiers (settings.tou_extra_tiers): generator, solar… */
+  @state() private _touExtraTiers: TouExtraTier[] = [];
   /** Global store limits for the room cards' store notes. */
   /** Tier dictionary (prices + vocabulary the sources feed) for the settings block. */
   @state() private _touTierInfo: TouTierInfo | null = null;
@@ -526,6 +529,7 @@ export class RoomMindPanel extends LitElement {
             .rooms=${this._rooms}
             .touRules=${this._touRules}
             .schedulesLib=${this._schedulesLib}
+            .touExtraTiers=${this._touExtraTiers}
             .touLimits=${this._touLimits}
             .touTierInfo=${this._touTierInfo}
             @back-clicked=${this._onBackFromDetail}
@@ -839,6 +843,7 @@ export class RoomMindPanel extends LitElement {
         coil_dry_mode: string;
         coil_dry_fan_mode: string;
         schedules_lib: BaseSchedule[];
+        tou_extra_tiers: TouExtraTier[];
         tou_rules: TouRule[];
         tou_limits?: TouLimits;
         tou_tier_info?: TouTierInfo | null;
@@ -865,6 +870,7 @@ export class RoomMindPanel extends LitElement {
       this._presencePersons = result.presence_persons ?? [];
       this._presenceAwayAction = result.presence_away_action ?? "eco";
       this._touRules = result.tou_rules ?? [];
+      this._touExtraTiers = result.tou_extra_tiers ?? [];
       this._schedulesLib = result.schedules_lib ?? [];
       this._touLimits = result.tou_limits ?? this._touLimits;
       this._touTierInfo = result.tou_tier_info ?? null;

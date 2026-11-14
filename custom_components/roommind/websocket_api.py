@@ -34,6 +34,8 @@ from .const import (
     TOU_BLOCK_SIDES,
     TOU_BLOCK_VALUE_MODES,
     TOU_EDGES,
+    TOU_EXTRA_TIER_ID_CHARS,
+    TOU_EXTRA_TIER_KINDS,
     TOU_LOOKAHEADS,
     TOU_PHASES,
     TOU_ROW_ACTIONS,
@@ -47,6 +49,7 @@ from .const import (
     TOU_SHIFT_DIRECTIONS,
     TOU_SIDES,
     TOU_TIER_SOURCES,
+    TOU_TIER_UNKNOWN,
     TOU_TIERS,
     TOU_UNTILS,
     TOU_VALUE_MODES,
@@ -184,7 +187,9 @@ def _schedule_blocks_error(blocks: list) -> tuple[str, str] | None:
 # a blank side skips that mode. See TouManager.row_records for compilation.
 _TOU_RULE_DEF_FIELDS = {
     vol.Required("name"): str,
-    vol.Optional("tier", default="any"): vol.In([*TOU_TIERS, "any"]),
+    # Tier relaxed to str: the static schema cannot know the extra-tier
+    # registry's ids; _tou_rule_def_error validates against them.
+    vol.Optional("tier", default="any"): str,
     vol.Optional("edge", default="start"): vol.In(TOU_EDGES),
     vol.Required("action"): vol.In(TOU_ROW_ACTIONS),
     vol.Optional("heat"): vol.Any(None, "comfort", "eco", vol.Coerce(float)),
@@ -200,14 +205,57 @@ _TOU_RULE_DEF_FIELDS = {
 }
 
 
-def _tou_rule_def_error(defn: dict) -> str | None:
-    """Validate one tariff rule definition; return an error message or None."""
+def _extra_tier_ids(settings: dict) -> tuple[str, ...]:
+    """Tier ids the extra-tier registry currently defines (for rule anchors)."""
+    out: list[str] = []
+    for entry in settings.get("tou_extra_tiers") or []:
+        if isinstance(entry, dict) and entry.get("id"):
+            out.append(str(entry["id"]))
+    return tuple(out)
+
+
+def _tou_extra_tiers_error(entries: list) -> str | None:
+    """(message) for the extra-tier registry, or None when coherent."""
+    seen: set[str] = set()
+    for entry in entries:
+        tid = str(entry.get("id") or "")
+        if (
+            not tid
+            or len(tid) > 32
+            or tid in TOU_TIERS
+            or tid in (TOU_TIER_UNKNOWN, "any")
+            or not all(c in TOU_EXTRA_TIER_ID_CHARS for c in tid)
+        ):
+            return f"Invalid extra tier id '{tid}'"
+        if tid in seen:
+            return "Extra tier IDs must be unique"
+        seen.add(tid)
+        if not str(entry.get("name") or "").strip():
+            return "Extra tiers need a name"
+        if not str(entry.get("entity_id") or ""):
+            return f"Tier '{tid}' needs a sensing entity"
+        kind = str(entry.get("kind") or "binary_on")
+        if kind == "state" and not [str(s) for s in entry.get("states") or [] if str(s).strip()]:
+            return f"Tier '{tid}': state activation needs at least one state"
+    return None
+
+
+def _tou_rule_def_error(defn: dict, allowed_tiers: tuple[str, ...] = ()) -> str | None:
+    """Validate one tariff rule definition; return an error message or None.
+
+    ``allowed_tiers`` carries the extra-tier registry ids: a rule may anchor
+    on a generator or a solar window just as on a grid period, and only the
+    handler (not the static schema) can know those user-created labels.
+    """
     name = str(defn.get("name") or "").strip()
     if not name:
         return "Tariff rules need a name"
     action = str(defn.get("action") or "")
     if action not in TOU_ROW_ACTIONS:
         return f"Unknown action '{action}'"
+    tier = str(defn.get("tier") or "any")
+    if tier != "any" and tier not in TOU_TIERS and tier not in allowed_tiers:
+        return f"Unknown tariff period '{tier}'"
     sides = [v for v in (defn.get("heat"), defn.get("cool")) if v is not None]
     if not sides:
         return "Tariff rules need a heating or a cooling value"
@@ -485,6 +533,7 @@ _SETTINGS_SAVE_FIELDS = (
     "tou_coast_max_minutes",
     "tou_schedules",
     "tou_rules",
+    "tou_extra_tiers",
 )
 
 
@@ -661,6 +710,9 @@ async def websocket_list_rooms(
             # The base-schedule library, so room cards can offer it for
             # opt-in binding without a second round-trip.
             "schedules_lib": settings.get("schedules_lib", []),
+            # Extra tariff tiers (generator, solar…): cards offer their ids in
+            # rule anchors and the dictionary shows their rows.
+            "tou_extra_tiers": settings.get("tou_extra_tiers", []),
             # Tier dictionary: what the bound sources actually feed (prices,
             # vocabulary, unmapped strings) for the settings confirmation block.
             "tou_tier_info": (
@@ -911,7 +963,7 @@ async def websocket_save_room(
         for r in overrides:
             defn = r.get("definition")
             if defn is not None:
-                err = _tou_rule_def_error(defn)
+                err = _tou_rule_def_error(defn, _extra_tier_ids(store.get_settings()))
                 if err:
                     connection.send_error(msg["id"], "invalid_tou_override", err)
                     return
@@ -1284,6 +1336,25 @@ async def websocket_get_settings(
         ],
         vol.Optional("tou_flag_entities"): {vol.In(TOU_TIERS): str},
         vol.Optional("tou_price_weighting"): bool,
+        # Extra tariff tiers: sensor-driven energy sources (generator, solar,
+        # export credit) that behave like tariff periods but are priced by the
+        # user. Listed order = priority over the grid tier; rule anchors and
+        # the engine accept their ids (handler-side validation, since the
+        # static schema cannot know user-created labels).
+        vol.Optional("tou_extra_tiers"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("name"): str,
+                vol.Required("entity_id"): str,
+                vol.Optional("kind", default="binary_on"): vol.In(TOU_EXTRA_TIER_KINDS),
+                vol.Optional("threshold", default=0.0): vol.Coerce(float),
+                vol.Optional("states", default=[]): [str],
+                vol.Optional("for_seconds", default=120): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
+                vol.Optional("cost"): vol.Any(None, vol.Coerce(float)),
+                vol.Optional("unit", default=""): str,
+                vol.Optional("enabled", default=True): bool,
+            }
+        ],
         # User-assigned period vocabulary: raw state (lower-cased) -> tier.
         # Consulted by TouManager._normalize_period before word recognition.
         vol.Optional("tou_period_aliases"): {
@@ -1459,6 +1530,16 @@ async def websocket_save_settings(
                 )
                 return
 
+    # Extra tier registry: ids, sensing shapes and coherence — validated
+    # whenever the registry itself is saved, ahead of the rules that anchor
+    # on its ids.
+    extras = changes.get("tou_extra_tiers")
+    if extras is not None:
+        extras_err = _tou_extra_tiers_error(extras)
+        if extras_err:
+            connection.send_error(msg["id"], "invalid_tou_extra_tier", extras_err)
+            return
+
     # Shared tariff rule library direct edit: unique ids and names, coherent
     # definitions. Pruning stays on the room channels, so rules pre-seeded
     # through this path survive until the first card save claims (or drops) them.
@@ -1473,7 +1554,7 @@ async def websocket_save_settings(
             connection.send_error(msg["id"], "duplicate_tou_rule_name", "Tariff rule names must be unique")
             return
         for r in rules:
-            err = _tou_rule_def_error(r)
+            err = _tou_rule_def_error(r, _extra_tier_ids({**store.get_settings(), **changes}))
             if err:
                 connection.send_error(msg["id"], "invalid_tou_rule", err)
                 return

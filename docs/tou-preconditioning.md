@@ -379,6 +379,33 @@ Because named values (Comfort/Eco) resolve at use time, a base schedule can
 say "back to comfort at 06:30" and follow each room when you retune its
 comfort target — one schedule, per-room values.
 
+## Other energy sources as tariff tiers
+
+The grid tariff is not the only electricity a room is heated with. Settings →
+Time-of-Use has **Other energy sources / tiers**: each row promotes a sensor to
+a first-class tariff period — **Generator**, **Solar**, **Solar excess** — and
+the whole dynamic machinery (rules, pre-conditioning, coasting, price
+weighting) applies to it unchanged:
+
+- **Holds while** picks how the sensor is read: a binary or on/off signal; a
+  numeric value above/below a threshold (the direction is yours — meter sign
+  conventions differ per integration, a negative grid value means export for
+  some vendors and import for others); or a state name from the sensor's own
+  vocabulary (a Generac `…_status` reporting `Running`, an EcoFlow operating
+  mode). **Sustained for** debounces chatter — a generator reaching steady
+  speed or an inverter hovering at standby must not strobe the tariff; while
+  a source is held, its boundaries anchor `· starts` / `· ends` rules, and
+  "until the next period change" means exactly that: the window closes when
+  the flag drops.
+- **Cost per kWh** is typed by you: the gas cost of a kWh for a generator,
+  `0` for self-consumed sun, a negative feed-in credit for export. The MPC
+  weighs these against the cheapest known grid price, so a cheap generator
+  invites pre-conditioning and an expensive one invites load-shifting — the
+  grid tariff keeps being tracked underneath and resumes the instant the
+  source drops.
+- Listed order is priority; a row without a cost still steers rules and the
+  panel, it is just economically neutral.
+
 ## Reading it back
 
 Three global entities reflect the tariff: `sensor.roommind_energy_rate`

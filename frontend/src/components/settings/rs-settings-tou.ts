@@ -32,6 +32,7 @@ import type {
   TouTierInfo,
   TouTierInfoTier,
   TouTierSource,
+  TouExtraTier,
 } from "../../types";
 import { localize, type TranslationKey } from "../../utils/localize";
 import { getSelectValue } from "../../utils/events";
@@ -77,6 +78,9 @@ export class RsSettingsTou extends LitElement {
   @property({ type: Array }) public touCalendarEntities: TouCalendarBinding[] = [];
   @property({ type: Array }) public touRateWindows: TouRateWindow[] = [];
   @property({ attribute: false }) public touFlagEntities: Record<string, string> = {};
+  /** Extra tariff tiers (settings["tou_extra_tiers"]): shared sensor-driven
+   * sources the user prices themselves — generator, solar, export credit. */
+  @property({ type: Array }) public touExtraTiers: TouExtraTier[] = [];
   @property({ type: Boolean }) public touPriceWeighting = true;
   @property({ attribute: false }) public touThresholds: Record<string, string> = {};
   @property({ type: Number }) public touHeatMin = 17;
@@ -253,6 +257,12 @@ export class RsSettingsTou extends LitElement {
       .picker-row ha-entity-picker {
         flex: 1;
         min-width: 0;
+      }
+      .source-row {
+        align-items: center;
+      }
+      .source-row .source-del {
+        justify-self: end;
       }
       .window-row {
         display: flex;
@@ -568,7 +578,7 @@ export class RsSettingsTou extends LitElement {
                   ? html` <div class="hint">${localize("tou.card_schedule_hint", l)}</div> `
                   : nothing
               }
-              ${this._renderTierDictionary(l)}
+              ${this._renderExtraTiers(l)} ${this._renderTierDictionary(l)}
 
               <div class="fine-tune-row" @click=${() => (this._fineTuneOpen = !this._fineTuneOpen)}>
                 <ha-icon
@@ -969,6 +979,133 @@ export class RsSettingsTou extends LitElement {
     this._fire("touPeriodAliases", next);
   }
 
+  private _renderExtraTiers(l: string) {
+    const tiers = this.touExtraTiers ?? [];
+    const set = (i: number, patch: Partial<TouExtraTier>) =>
+      this._fire(
+        "touExtraTiers",
+        tiers.map((t, j) => (j === i ? { ...t, ...patch } : t)),
+      );
+    const remove = (i: number) =>
+      this._fire(
+        "touExtraTiers",
+        tiers.filter((_, j) => j !== i),
+      );
+    const add = () =>
+      this._fire("touExtraTiers", [
+        ...tiers,
+        {
+          id: `x${Date.now().toString(36)}`,
+          name: localize("tou.source_default_name", l),
+          entity_id: "",
+          kind: "binary_on" as const,
+          for_seconds: 300,
+          cost: null,
+          enabled: true,
+        },
+      ]);
+    return html`
+      <div class="section-label">${localize("tou.sources_title", l)}</div>
+      <div class="hint">${localize("tou.sources_hint", l)}</div>
+      ${tiers.map(
+        (t, i) =>
+          html`<div class="tier-grid source-row">
+            <ha-textfield
+              .label=${localize("tou.source_name", l)}
+              .value=${t.name ?? ""}
+              @change=${(e: Event) => set(i, { name: (e.target as HTMLInputElement).value.trim() })}
+            ></ha-textfield>
+            <div class="picker-row">
+              <ha-entity-picker
+                .hass=${this.hass}
+                .value=${t.entity_id ?? ""}
+                .includeDomains=${["sensor", "binary_sensor", "select", "input_boolean", "input_select", "input_number"]}
+                .label=${localize("tou.source_entity", l)}
+                @value-changed=${(e: CustomEvent) => set(i, { entity_id: (e.detail?.value as string) ?? "" })}
+              ></ha-entity-picker>
+              <ha-icon-button
+                class="source-del"
+                .path=${CLOSE_ICON}
+                .label=${localize("tou.source_delete", l)}
+                @click=${() => remove(i)}
+              ></ha-icon-button>
+            </div>
+            <ha-select
+              .label=${localize("tou.source_kind", l)}
+              .value=${t.kind ?? "binary_on"}
+              .options=${[
+                { value: "binary_on", label: localize("tou.source_kind.binary_on", l) },
+                { value: "numeric_above", label: localize("tou.source_kind.numeric_above", l) },
+                { value: "numeric_below", label: localize("tou.source_kind.numeric_below", l) },
+                { value: "state", label: localize("tou.source_kind.state", l) },
+              ]}
+              @selected=${(e: Event) => {
+                const v = getSelectValue(e);
+                if (
+                  v === "binary_on" ||
+                  v === "numeric_above" ||
+                  v === "numeric_below" ||
+                  v === "state"
+                )
+                  set(i, { kind: v });
+              }}
+              @closed=${(e: Event) => e.stopPropagation()}
+              fixedMenuPosition
+            ></ha-select>
+            ${
+              t.kind === "numeric_above" || t.kind === "numeric_below"
+                ? html`<ha-textfield
+                    type="number"
+                    .label=${localize("tou.source_threshold", l)}
+                    .value=${String(t.threshold ?? 0)}
+                    @change=${(e: Event) =>
+                      set(i, { threshold: parseFloat((e.target as HTMLInputElement).value) || 0 })}
+                  ></ha-textfield>`
+                : t.kind === "state"
+                  ? html`<ha-textfield
+                      .label=${localize("tou.source_states", l)}
+                      .value=${(t.states ?? []).join(", ")}
+                      @change=${(e: Event) =>
+                        set(i, {
+                          states: (e.target as HTMLInputElement).value
+                            .split(",")
+                            .map((s) => s.trim())
+                            .filter((s) => s),
+                        })}
+                    ></ha-textfield>`
+                  : html`<div></div>`
+            }
+            <ha-textfield
+              type="number"
+              .label=${localize("tou.source_for", l)}
+              .value=${String(t.for_seconds ?? 300)}
+              min="0"
+              step="30"
+              @change=${(e: Event) =>
+                set(i, {
+                  for_seconds: Math.max(0, parseInt((e.target as HTMLInputElement).value, 10) || 0),
+                })}
+            ></ha-textfield>
+            <ha-textfield
+              type="number"
+              .label=${localize("tou.source_cost", l)}
+              .value=${t.cost == null ? "" : String(t.cost)}
+              step="0.001"
+              @change=${(e: Event) => {
+                const raw = (e.target as HTMLInputElement).value.trim();
+                set(i, { cost: raw === "" ? null : parseFloat(raw) });
+              }}
+            ></ha-textfield>
+          </div>`,
+      )}
+      ${tiers.length > 0 ? html`<div class="hint">${localize("tou.sources_cost_hint", l)}</div>` : nothing}
+      <div class="window-row--add" @click=${add}>
+        <ha-icon icon="mdi:plus"></ha-icon>
+        <span>${localize("tou.source_add", l)}</span>
+      </div>
+    `;
+  }
+
   private _renderTierDictionary(l: string) {
     const info = this.touTierInfo;
     if (info === null) {
@@ -982,13 +1119,15 @@ export class RsSettingsTou extends LitElement {
       <div class="section-label">${localize("tou.dic_title", l)}</div>
       <div class="hint">${localize("tou.dic_hint", l)}</div>
       ${this._summaryLine(info, l)}
-      <div class="dic-rows">${TOU_TIERS.map((t) => this._renderDicRow(t, info, l))}</div>
+      <div class="dic-rows">
+        ${Object.keys(info.tiers).map((t) => this._renderDicRow(t, info, l))}
+      </div>
       ${(info.unmapped ?? []).length > 0 ? this._renderUnmapped(info, l) : nothing}
       <div class="hint">${localize("tou.dic_cutoff_hint", l)}</div>
     `;
   }
 
-  private _renderDicRow(t: TouTier, info: TouTierInfo, l: string) {
+  private _renderDicRow(t: string, info: TouTierInfo, l: string) {
     const ti = info.tiers[t];
     const now = ti?.current
       ? html`<span class="dic-now">${localize("tou.dic_now", l)}</span>`
@@ -1000,7 +1139,9 @@ export class RsSettingsTou extends LitElement {
     const chips = (ti?.names ?? []).map((n) => this._renderVocabChip(n, l));
     return html`
       <div class="dic-row">
-        <span class="dic-tier">${localize(`tou.tier.${t}`, l)}${now}${next}</span>
+        <span class="dic-tier"
+          >${ti?.label || localize(`tou.tier.${t}` as TranslationKey, l)}${now}${next}</span
+        >
         <span class="dic-price">${this._rateText(ti, info.unit, l)}</span>
         <span>${chips}</span>
       </div>

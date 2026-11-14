@@ -161,18 +161,20 @@ export interface BaseScheduleRef {
  * (source currently down), manual window, or configured cutoff. */
 export interface TouTierInfoTier {
   rate: number | null;
-  kind: "live" | "next" | "last" | "window" | "cutoff" | null;
+  kind: "live" | "next" | "last" | "window" | "cutoff" | "source" | null;
   min?: number | null;
   max?: number | null;
   count?: number;
   ts?: number | null;
+  /** Display name of an extra tier; null on the grid four (i18n names). */
+  label?: string | null;
   names: string[];
   current: boolean;
 }
 
 export interface TouTierInfo {
   unit: string;
-  tiers: Partial<Record<TouTier, TouTierInfoTier>>;
+  tiers: Record<string, TouTierInfoTier>;
   unmapped: { state: string; count: number }[];
   current: { tier: TouTier; rate: number; stale: boolean } | null;
   next: { ts: number | null; tier: TouTier; rate: number | null; stale: boolean } | null;
@@ -190,6 +192,24 @@ export type TouTierSource = "auto" | "period" | "rate" | "flags";
  * with the cost thresholds; "none" = shape only, no pre-conditioning/coasting
  * planning). */
 export type TouLookahead = "auto" | "calendar" | "next_change_rate" | "next_change" | "none";
+
+/** One extra tariff tier (settings["tou_extra_tiers"]): a sensor-driven
+ * energy source — generator, solar, export credit — that behaves like a
+ * tariff period. Listed order = priority over the grid tier; its cost is
+ * what the MPC prices and rules anchor on. */
+export interface TouExtraTier {
+  id: string;
+  name: string;
+  entity_id: string;
+  kind: "binary_on" | "numeric_above" | "numeric_below" | "state";
+  threshold?: number;
+  states?: string[];
+  for_seconds?: number;
+  /** CAD/kWh; 0 = free (self-consumed solar), negative = credit. */
+  cost?: number | null;
+  unit?: string;
+  enabled?: boolean;
+}
 
 /** What an override row does to the resolved schedule target. "arrive" is the
  * decay-derived action: the room must coast to the value exactly at the
@@ -404,6 +424,7 @@ export interface GlobalSettings {
    * "ulo_mid_peak"); its vocabulary maps to the coming tier without
    * thresholds or a fixed dropdown. */
   tou_next_period_entity?: string;
+  tou_extra_tiers?: TouExtraTier[];
   /** "" = no lookahead (the next-change step is disabled). */
   tou_next_change_tier?: TouTier | "";
   tou_calendar_entities?: TouCalendarBinding[];

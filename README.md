@@ -33,8 +33,10 @@
 - **Compressor Group Protection** - Define groups of climate devices sharing an outdoor compressor. Enforces minimum run and off times to prevent short-cycling. Until `min_run_minutes` has elapsed, a device keeps its last active setpoint, including a boost setpoint, so the room can overshoot its target further than without protection. A target that changes on purpose in the meantime (override, vacation, schedule off, presence) is passed on to the device right away (a device with a single heat/cool setpoint only when that cannot push the room the wrong way).
 - **Time-of-Use Control & Pre-conditioning** - Link a tariff source (cost/period sensors, Hydro One, Tibber, Nord Pool, tariff calendars, or plain period flags) and let each room store energy between tariff periods: targets relax across expensive stretches and pre-charge before them, bounded by a consent band, a max swing and a price gap that must justify the move. Tariff rows on the device cards anchor target overrides to tariff periods — including a decay-derived "reach N °C by time" that stops heating at the cheap-window end and coasts the room to the exact arrival temperature, planned by price-weighted MPC against the learned model. Time-of-day
 targets live in RoomMind as well: house/floor/room base schedules with fixed,
-Comfort or Eco targets that the tariff rules steer around dynamically. Manual
-overrides and vacation stay in charge. The settings panel shows the
+Comfort or Eco targets that the tariff rules steer around dynamically. Sensor
+-driven extras (generator, solar, export credit) become first-class tariff
+periods with their own cost and rules. Manual overrides and vacation stay in
+charge. The settings panel shows the
 tariff as your sources actually feed it — tier prices pulled live, the
 coming period with its published price, period vocabulary — keeps the last
 valid price when a cost source drops, and lets you assign names RoomMind

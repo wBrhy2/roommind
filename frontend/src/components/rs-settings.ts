@@ -15,6 +15,7 @@ import type {
   TouCalendarBinding,
   TouRateWindow,
   TouTierInfo,
+  TouExtraTier,
 } from "../types";
 import { localize } from "../utils/localize";
 import { fireSaveStatus } from "../utils/events";
@@ -99,6 +100,8 @@ export class RsSettings extends LitElement {
   @state() private _touSwing = 3;
   @state() private _touStoreGap = 1;
   @state() private _touPeriodAliases: Record<string, string> = {};
+  /** Extra tariff tiers (settings.tou_extra_tiers): shared generator/solar… rows. */
+  @state() private _touExtraTiers: TouExtraTier[] = [];
   @state() private _coilDryEnabled = false;
   @state() private _coilDryMinutes = 20;
   @state() private _coilDryMode: "fan_only" | "dry" = "fan_only";
@@ -192,6 +195,7 @@ export class RsSettings extends LitElement {
       this._touSwing = s.tou_swing ?? 3;
       this._touStoreGap = s.tou_store_gap ?? 1;
       this._touPeriodAliases = s.tou_period_aliases ?? {};
+      this._touExtraTiers = s.tou_extra_tiers ?? [];
       this._coilDryEnabled = s.coil_dry_enabled ?? false;
       this._coilDryMinutes = s.coil_dry_minutes ?? 20;
       this._coilDryMode = s.coil_dry_mode ?? "fan_only";
@@ -366,6 +370,7 @@ export class RsSettings extends LitElement {
           .touCalendarEntities=${this._touCalendarEntities}
           .touRateWindows=${this._touRateWindows}
           .touFlagEntities=${this._touFlagEntities}
+          .touExtraTiers=${this._touExtraTiers}
           .touPriceWeighting=${this._touPriceWeighting}
           .touThresholds=${this._touThresholds}
           .touHeatMin=${this._touHeatMin}
@@ -467,7 +472,25 @@ export class RsSettings extends LitElement {
     const { key, value } = e.detail;
     if (key === "climateControlActive") this._climateControlDirty = true;
     (this as Record<string, unknown>)[`_${key}`] = value;
+    // The extra-tier registry is shared settings, not a room field: persist it
+    // with its own save so a rule added elsewhere sees it immediately.
+    if (key === "touExtraTiers") {
+      void this._saveExtraTiers();
+      return;
+    }
     this._autoSave();
+  }
+
+  private async _saveExtraTiers() {
+    try {
+      await this.hass.callWS({
+        type: "roommind/settings/save",
+        tou_extra_tiers: this._touExtraTiers,
+      });
+    } catch {
+      // eslint-disable-next-line no-console
+      console.debug("[RoomMind] extra-tier save failed");
+    }
   }
 
   /**
@@ -582,6 +605,7 @@ export class RsSettings extends LitElement {
         tou_swing: this._touSwing,
         tou_store_gap: this._touStoreGap,
         tou_period_aliases: this._touPeriodAliases,
+        tou_extra_tiers: this._touExtraTiers,
       });
       // Toggled again while the request was out: stays dirty, the queued save sends it.
       if (this._climateControlActive === sentClimateControl) this._climateControlDirty = false;

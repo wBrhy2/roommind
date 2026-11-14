@@ -78,6 +78,8 @@ export class RsScheduleSettings extends RsScheduleBase {
     return this._lib ?? this.baseLibrary ?? [];
   }
 
+  private _synced = false;
+
   private _isBound(id: string): boolean {
     return (this.baseSchedules ?? []).some((r) => r.id === id);
   }

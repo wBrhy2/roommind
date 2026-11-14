@@ -18,6 +18,7 @@ import type {
   ScheduleBlock,
   BaseSchedule,
   BaseScheduleRef,
+  TouExtraTier,
 } from "../types";
 import "./rs-hero-status";
 import "./rs-climate-mode-selector";
@@ -125,6 +126,8 @@ export class RsRoomDetail extends LitElement {
   @property({ attribute: false }) public touRules: TouRule[] = [];
   /** Shared base-schedule library (settings["schedules_lib"]) for the schedule section. */
   @property({ attribute: false }) public schedulesLib: BaseSchedule[] = [];
+  /** Extra tariff tiers (settings["tou_extra_tiers"]) offered as rule anchors. */
+  @property({ attribute: false }) public touExtraTiers: TouExtraTier[] = [];
   /** Tier dictionary (prices/vocabulary) from the panel, for tier labels. */
   @property({ attribute: false }) public touTierInfo: TouTierInfo | null = null;
   @property({ attribute: false }) public touLimits: TouLimits = {
@@ -732,6 +735,7 @@ export class RsRoomDetail extends LitElement {
                     .scheduleEnabled=${this._touScheduleEnabled}
                     .overrides=${this._touOverrides}
                     .rules=${this.touRules}
+                    .extraTiers=${this.touExtraTiers}
                     .limits=${this.touLimits}
                     .roomLimits=${this._touRoomLimits}
                     .tierInfo=${this.touTierInfo}
@@ -1044,6 +1048,7 @@ export class RsRoomDetail extends LitElement {
             .scheduleEnabled=${this._touScheduleEnabled}
             .overrides=${this._touOverrides}
             .rules=${this.touRules}
+            .extraTiers=${this.touExtraTiers}
             .limits=${this.touLimits}
             .roomLimits=${this._touRoomLimits}
             .tierInfo=${this.touTierInfo}
