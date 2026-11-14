@@ -15,6 +15,9 @@ import type {
   TouOverrideRow,
   TouTierInfo,
   TouRule,
+  ScheduleBlock,
+  BaseSchedule,
+  BaseScheduleRef,
 } from "../types";
 import "./rs-hero-status";
 import "./rs-climate-mode-selector";
@@ -71,6 +74,8 @@ export class RsRoomDetail extends LitElement {
   @state() private _windowCloseDelay = 0;
   @state() private _climateMode: ClimateMode = "auto";
   @state() private _schedules: ScheduleEntry[] = [];
+  @state() private _scheduleBlocks: ScheduleBlock[] = [];
+  @state() private _baseSchedules: BaseScheduleRef[] = [];
   @state() private _scheduleSelectorEntity = "";
   @state() private _comfortHeat = 21.0;
   @state() private _comfortCool = 24.0;
@@ -118,6 +123,8 @@ export class RsRoomDetail extends LitElement {
   /** All rooms + the shared rule library, for the tariff schedule editor. */
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
   @property({ attribute: false }) public touRules: TouRule[] = [];
+  /** Shared base-schedule library (settings["schedules_lib"]) for the schedule section. */
+  @property({ attribute: false }) public schedulesLib: BaseSchedule[] = [];
   /** Tier dictionary (prices/vocabulary) from the panel, for tier labels. */
   @property({ attribute: false }) public touTierInfo: TouTierInfo | null = null;
   @property({ attribute: false }) public touLimits: TouLimits = {
@@ -315,6 +322,8 @@ export class RsRoomDetail extends LitElement {
       this._windowCloseDelay = this.config.window_close_delay ?? 0;
       this._climateMode = this.config.climate_mode;
       this._schedules = this.config.schedules ?? [];
+      this._scheduleBlocks = this.config.schedule_blocks ?? [];
+      this._baseSchedules = this.config.base_schedules ?? [];
       this._scheduleSelectorEntity = this.config.schedule_selector_entity ?? "";
       this._comfortHeat = this.config.comfort_heat ?? this.config.comfort_temp ?? 21.0;
       this._comfortCool = this.config.comfort_cool ?? 24.0;
@@ -526,12 +535,17 @@ export class RsRoomDetail extends LitElement {
                       .preheatEnabled=${this._preheatEnabled}
                       .showPreheat=${this._showPreheat()}
                       .editing=${false}
+                      .baseLibrary=${this.schedulesLib}
+                      .baseSchedules=${this._baseSchedules}
+                      .scheduleBlocks=${this._scheduleBlocks}
                       @schedules-changed=${this._onSchedulesChanged}
                       @schedule-selector-changed=${this._onScheduleSelectorChanged}
                       @comfort-heat-changed=${this._onComfortHeatChanged}
                       @comfort-cool-changed=${this._onComfortCoolChanged}
                       @eco-heat-changed=${this._onEcoHeatChanged}
                       @eco-cool-changed=${this._onEcoCoolChanged}
+                      @schedule-blocks-changed=${this._onScheduleBlocksChanged}
+                      @base-schedules-changed=${this._onBaseSchedulesChanged}
                     ></rs-schedule-settings>
                     ${
                       this.config
@@ -819,6 +833,9 @@ export class RsRoomDetail extends LitElement {
             .preheatEnabled=${this._preheatEnabled}
             .showPreheat=${this._showPreheat()}
             .editing=${true}
+            .baseLibrary=${this.schedulesLib}
+            .baseSchedules=${this._baseSchedules}
+            .scheduleBlocks=${this._scheduleBlocks}
             @schedules-changed=${this._onSchedulesChanged}
             @schedule-selector-changed=${this._onScheduleSelectorChanged}
             @comfort-heat-changed=${this._onComfortHeatChanged}
@@ -826,6 +843,8 @@ export class RsRoomDetail extends LitElement {
             @eco-heat-changed=${this._onEcoHeatChanged}
             @eco-cool-changed=${this._onEcoCoolChanged}
             @preheat-changed=${this._onPreheatChanged}
+            @schedule-blocks-changed=${this._onScheduleBlocksChanged}
+            @base-schedules-changed=${this._onBaseSchedulesChanged}
           ></rs-schedule-settings>
         </rs-edit-dialog>`;
       case "devices":
@@ -1045,6 +1064,16 @@ export class RsRoomDetail extends LitElement {
 
   private _onSchedulesChanged(e: CustomEvent<{ value: ScheduleEntry[] }>) {
     this._schedules = e.detail.value;
+    this._autoSave();
+  }
+
+  private _onScheduleBlocksChanged(e: CustomEvent<ScheduleBlock[]>) {
+    this._scheduleBlocks = e.detail;
+    this._autoSave();
+  }
+
+  private _onBaseSchedulesChanged(e: CustomEvent<BaseScheduleRef[]>) {
+    this._baseSchedules = e.detail;
     this._autoSave();
   }
 
@@ -1305,6 +1334,8 @@ export class RsRoomDetail extends LitElement {
         window_close_delay: this._windowCloseDelay,
         climate_mode: this._climateMode,
         schedules: this._schedules,
+        schedule_blocks: this._scheduleBlocks,
+        base_schedules: this._baseSchedules,
         schedule_selector_entity: this._scheduleSelectorEntity,
         comfort_heat: this._comfortHeat,
         comfort_cool: this._comfortCool,

@@ -139,6 +139,45 @@ def _hhmm_ok(text: str) -> bool:
     return 0 <= int(parts[0]) <= 23 and 0 <= int(parts[1]) <= 59
 
 
+# Shared schedule-block fields: a room's own `schedule_blocks` rows and the
+# blocks inside a base schedule (settings["schedules_lib"]) are the same rows.
+_SCHEDULE_BLOCK_FIELDS = {
+    vol.Required("id"): str,
+    vol.Required("name"): str,
+    vol.Optional("enabled", default=True): bool,
+    vol.Required("when"): {
+        vol.Required("start"): str,
+        vol.Required("end"): str,
+        vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
+    },
+    vol.Optional("gate", default="always"): vol.In(TOU_BLOCK_GATES),
+    vol.Optional("side", default="both"): vol.In(TOU_BLOCK_SIDES),
+    vol.Required("value"): {
+        vol.Required("mode"): vol.In(TOU_BLOCK_VALUE_MODES),
+        vol.Optional("temp"): vol.Coerce(float),
+        vol.Optional("direction"): vol.In(TOU_SHIFT_DIRECTIONS),
+        vol.Optional("delta"): vol.Coerce(float),
+    },
+}
+
+
+def _schedule_blocks_error(blocks: list) -> tuple[str, str] | None:
+    """(code, message) for a schedule-block list, or None when coherent."""
+    block_ids = [str(b.get("id", "")) for b in blocks]
+    if len(block_ids) != len(set(block_ids)):
+        return "duplicate_schedule_block_id", "Schedule block IDs must be unique"
+    for b in blocks:
+        when = b.get("when") or {}
+        if not _hhmm_ok(str(when.get("start") or "")) or not _hhmm_ok(str(when.get("end") or "")):
+            return "invalid_schedule_block_time", "Schedule blocks need 'HH:MM' start and end"
+        value = b.get("value") or {}
+        if value.get("mode") == "set" and not isinstance(value.get("temp"), (int, float)):
+            return "invalid_schedule_block_value", "'set' blocks need a temperature"
+        if value.get("mode") == "shift" and value.get("direction") not in TOU_SHIFT_DIRECTIONS:
+            return "invalid_schedule_block_value", "'shift' blocks need a direction"
+    return None
+
+
 # Shared tariff rule definition fields (settings["tou_rules"] entries, and the
 # optional `definition` a card row carries while the rule is being created or
 # edited). heat/cool hold a °C target for set/arrive and a Δ for raise/lower;
@@ -373,6 +412,7 @@ _ROOM_SAVE_FIELDS = (
     "tou_swing",
     "tou_store_gap",
     "schedule_blocks",
+    "base_schedules",
     "tou_overrides",
     "tou_schedule_enabled",
 )
@@ -618,6 +658,9 @@ async def websocket_list_rooms(
             "coil_dry_drain_minutes": settings.get("coil_dry_drain_minutes", DEFAULT_COIL_DRY_DRAIN_MINUTES),
             "compressor_groups": settings.get("compressor_groups", []),
             "tou_rules": settings.get("tou_rules", []),
+            # The base-schedule library, so room cards can offer it for
+            # opt-in binding without a second round-trip.
+            "schedules_lib": settings.get("schedules_lib", []),
             # Tier dictionary: what the bound sources actually feed (prices,
             # vocabulary, unmapped strings) for the settings confirmation block.
             "tou_tier_info": (
@@ -635,6 +678,55 @@ async def websocket_list_rooms(
             },
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Base schedule library (shared time-of-day blocks: house / floor schedules
+# every room can opt into; blocks are the room's own schedule-block rows)
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/schedules_lib/save",
+        vol.Required("schedules"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("name"): str,
+                vol.Optional("scope", default="house"): vol.In(("house", "floor")),
+                vol.Optional("floor_id", default=""): str,
+                vol.Optional("blocks", default=[]): [_SCHEDULE_BLOCK_FIELDS],
+            }
+        ],
+    }
+)
+@websocket_api.async_response
+async def websocket_save_schedules_lib(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Replace the base-schedule library (the panel owns the whole list)."""
+    store = hass.data[DOMAIN]["store"]
+    schedules = msg["schedules"]
+    ids = [str(s.get("id", "")) for s in schedules]
+    if len(ids) != len(set(ids)):
+        connection.send_error(msg["id"], "duplicate_schedule_id", "Base schedule IDs must be unique")
+        return
+    names = [str(s.get("name", "")).strip() for s in schedules]
+    if not all(names):
+        connection.send_error(msg["id"], "invalid_schedule_name", "Base schedules need a name")
+        return
+    if len(names) != len(set(names)):
+        connection.send_error(msg["id"], "duplicate_schedule_name", "Base schedule names must be unique")
+        return
+    for s in schedules:
+        err = _schedule_blocks_error(s.get("blocks") or [])
+        if err:
+            connection.send_error(msg["id"], err[0], err[1])
+            return
+    await store.async_save_settings({"schedules_lib": schedules})
+    connection.send_result(msg["id"], {"schedules_lib": schedules})
 
 
 # ---------------------------------------------------------------------------
@@ -737,24 +829,14 @@ ROOM_SAVE_SCHEMA = {
     vol.Optional("tou_cool_max"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=5, max=40))),
     vol.Optional("tou_swing"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=10))),
     vol.Optional("tou_store_gap"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=1, max=10))),
-    vol.Optional("schedule_blocks"): [
+    vol.Optional("schedule_blocks"): [_SCHEDULE_BLOCK_FIELDS],
+    # Base schedules this room opts into (references into settings["schedules_lib"]).
+    # The library blocks resolve underneath the room's own schedule_blocks, so
+    # the room keeps the last word wherever they overlap.
+    vol.Optional("base_schedules"): [
         {
             vol.Required("id"): str,
-            vol.Required("name"): str,
             vol.Optional("enabled", default=True): bool,
-            vol.Required("when"): {
-                vol.Required("start"): str,
-                vol.Required("end"): str,
-                vol.Optional("days", default=[]): vol.All([vol.In(TOU_WEEKDAYS)], vol.Length(max=7)),
-            },
-            vol.Optional("gate", default="always"): vol.In(TOU_BLOCK_GATES),
-            vol.Optional("side", default="both"): vol.In(TOU_BLOCK_SIDES),
-            vol.Required("value"): {
-                vol.Required("mode"): vol.In(TOU_BLOCK_VALUE_MODES),
-                vol.Optional("temp"): vol.Coerce(float),
-                vol.Optional("direction"): vol.In(TOU_SHIFT_DIRECTIONS),
-                vol.Optional("delta"): vol.Coerce(float),
-            },
         }
     ],
     vol.Optional("tou_schedule_enabled"): bool,
@@ -812,24 +894,10 @@ async def websocket_save_room(
     # Room schedule blocks: unique ids, valid clock times, coherent values
     blocks = config.get("schedule_blocks")
     if blocks:
-        block_ids = [str(b.get("id", "")) for b in blocks]
-        if len(block_ids) != len(set(block_ids)):
-            connection.send_error(msg["id"], "duplicate_schedule_block_id", "Schedule block IDs must be unique")
+        blocks_err = _schedule_blocks_error(blocks)
+        if blocks_err:
+            connection.send_error(msg["id"], blocks_err[0], blocks_err[1])
             return
-        for b in blocks:
-            when = b.get("when") or {}
-            if not _hhmm_ok(str(when.get("start") or "")) or not _hhmm_ok(str(when.get("end") or "")):
-                connection.send_error(
-                    msg["id"], "invalid_schedule_block_time", "Schedule blocks need 'HH:MM' start and end"
-                )
-                return
-            value = b.get("value") or {}
-            if value.get("mode") == "set" and not isinstance(value.get("temp"), (int, float)):
-                connection.send_error(msg["id"], "invalid_schedule_block_value", "'set' blocks need a temperature")
-                return
-            if value.get("mode") == "shift" and value.get("direction") not in TOU_SHIFT_DIRECTIONS:
-                connection.send_error(msg["id"], "invalid_schedule_block_value", "'shift' blocks need a direction")
-                return
 
     # Tariff schedule rows (device card): rows are references into the shared
     # library; an attached definition is validated, upserted, and then stripped
@@ -1715,3 +1783,4 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_get_diagnostics)
     websocket_api.async_register_command(hass, websocket_covers_clear_override)
     websocket_api.async_register_command(hass, websocket_tou_preview)
+    websocket_api.async_register_command(hass, websocket_save_schedules_lib)

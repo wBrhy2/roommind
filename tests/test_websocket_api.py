@@ -22,6 +22,7 @@ from custom_components.roommind.websocket_api import (
     websocket_override_clear,
     websocket_override_set,
     websocket_save_room,
+    websocket_save_schedules_lib,
     websocket_save_settings,
     websocket_thermal_reset,
     websocket_thermal_reset_all,
@@ -99,6 +100,7 @@ async def test_list_rooms_empty(ws_hass, store, connection):
             "coil_dry_drain_minutes": 0,
             "compressor_groups": [],
             "tou_rules": [],
+            "schedules_lib": [],
             "tou_limits": {
                 "heat_min": 17.0,
                 "heat_max": 28.0,
@@ -1918,14 +1920,14 @@ async def test_analytics_model_has_occupancy_sensors_false(ws_hass, store, conne
 
 
 def test_register_websocket_commands(hass):
-    """async_register_websocket_commands registers all 14 commands."""
+    """async_register_websocket_commands registers all 15 commands."""
     from unittest.mock import patch
 
     from custom_components.roommind.websocket_api import async_register_websocket_commands
 
     with patch("custom_components.roommind.websocket_api.websocket_api.async_register_command") as mock_reg:
         async_register_websocket_commands(hass)
-        assert mock_reg.call_count == 14
+        assert mock_reg.call_count == 15
 
 
 # ---------------------------------------------------------------------------
@@ -3636,6 +3638,84 @@ async def test_save_settings_tou_rules_named_values(ws_hass, store, connection):
     }
     await _save_settings(ws_hass, connection, bad)
     assert connection.send_error.call_args[0][1] == "invalid_tou_rule"
+
+
+_save_schedules_lib = websocket_save_schedules_lib.__wrapped__
+
+
+@pytest.mark.asyncio
+async def test_save_schedules_lib_round_trip_and_validation(ws_hass, store, connection):
+    """The base-schedule library saves whole-list; ids/names/blocks are checked."""
+    await store.async_load()
+    schedules = [
+        {
+            "id": "sched-house",
+            "name": "House weekdays",
+            "scope": "house",
+            "blocks": [
+                {
+                    "id": "b1",
+                    "name": "eco night",
+                    "when": {"start": "22:00", "end": "06:00", "days": []},
+                    "side": "heat",
+                    "value": {"mode": "eco"},
+                }
+            ],
+        }
+    ]
+    msg = {"id": 92, "type": "roommind/schedules_lib/save", "schedules": schedules}
+    await _save_schedules_lib(ws_hass, connection, msg)
+    connection.send_result.assert_called_once()
+    assert store.get_settings()["schedules_lib"] == schedules
+
+    # A room binds the library schedule; the bind survives the room save.
+    await _save_room(
+        ws_hass,
+        connection,
+        {
+            "id": 93,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room",
+            "base_schedules": [{"id": "sched-house", "enabled": True}],
+        },
+    )
+    assert store.get_room("living_room")["base_schedules"] == [{"id": "sched-house", "enabled": True}]
+
+    # Duplicate ids rejected.
+    connection.send_result.reset_mock()
+    connection.send_error.reset_mock()
+    dup = {
+        "id": 94,
+        "type": "roommind/schedules_lib/save",
+        "schedules": [schedules[0], {**schedules[0], "name": "Other"}],
+    }
+    await _save_schedules_lib(ws_hass, connection, dup)
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "duplicate_schedule_id"
+
+    # A 'set' block without a temperature rejected (shared block validation).
+    connection.send_error.reset_mock()
+    bad = {
+        "id": 95,
+        "type": "roommind/schedules_lib/save",
+        "schedules": [
+            {
+                "id": "sched-x",
+                "name": "X",
+                "blocks": [
+                    {
+                        "id": "bx",
+                        "name": "no temp",
+                        "when": {"start": "08:00", "end": "09:00", "days": []},
+                        "side": "heat",
+                        "value": {"mode": "set"},
+                    }
+                ],
+            }
+        ],
+    }
+    await _save_schedules_lib(ws_hass, connection, bad)
+    assert connection.send_error.call_args[0][1] == "invalid_schedule_block_value"
 
 
 @pytest.mark.asyncio

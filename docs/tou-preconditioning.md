@@ -357,6 +357,28 @@ rules). Coast rules themselves were removed in 1.9.0-beta.8; the feature was
 beta-only, so leftover stored rules are dropped on load.
 
 
+## Base schedules — time blocks without leaving RoomMind
+
+The Schedule & Temperatures section now edits time-of-day blocks **inside
+RoomMind** — no HA helper to create by hand first:
+
+- **Room blocks** (`schedule_blocks`) are local to the room: name, clock
+  window, weekdays, a presence gate (always / when occupied / when away),
+  heat/cool/both, and a target — a fixed temperature, a delta, or the room's
+  own **Comfort**/**Eco** value. No days selected means every day; an end
+  before the start runs past midnight.
+- **Base schedules** (`schedules_lib`) are the reusable version: named block
+  lists scoped to the house or a floor. Each room **opts in explicitly** —
+  bind the schedules it should follow, in the room's own card.
+- **Precedence:** the room's own blocks outrank every bound base schedule
+  (a house schedule steers all its binders, but a room can always overrule
+  it); both outrank tariff shaping, which in turn steers around the plain
+  comfort/eco baseline. Changes apply on the next 30 s cycle.
+
+Because named values (Comfort/Eco) resolve at use time, a base schedule can
+say "back to comfort at 06:30" and follow each room when you retune its
+comfort target — one schedule, per-room values.
+
 ## Reading it back
 
 Three global entities reflect the tariff: `sensor.roommind_energy_rate`

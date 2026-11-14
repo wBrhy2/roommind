@@ -119,6 +119,41 @@ export interface TouLimits {
 /** Per-room overrides of the global limits; null/undefined = inherit. */
 export type TouRoomLimits = Partial<Record<keyof TouLimits, number | null>>;
 
+/** One time-of-day schedule row: a clock window on chosen weekdays that steers
+ * one or both modes. Room-local blocks (`schedule_blocks`) and the blocks of a
+ * base schedule (`schedules_lib`) share this shape and the same resolver. */
+export interface ScheduleBlock {
+  id: string;
+  name: string;
+  enabled?: boolean;
+  when: { start: string; end: string; days?: string[] };
+  gate?: "always" | "occupied" | "away";
+  side?: "heat" | "cool" | "both";
+  value: {
+    mode: "set" | "shift" | "comfort" | "eco";
+    temp?: number;
+    direction?: "raise" | "lower";
+    delta?: number;
+  };
+}
+
+/** A reusable house/floor schedule (settings["schedules_lib"]); rooms bind it
+ * explicitly. Its blocks resolve under each room's own schedule_blocks, so a
+ * house schedule steers every binder while each room keeps the last word. */
+export interface BaseSchedule {
+  id: string;
+  name: string;
+  scope: "house" | "floor";
+  floor_id?: string;
+  blocks: ScheduleBlock[];
+}
+
+/** A room's thin reference into the base-schedule library. */
+export interface BaseScheduleRef {
+  id: string;
+  enabled?: boolean;
+}
+
 /** Per-tier confirmation data from the bound tariff sources (see
  * TouManager.tier_info): the price the sources know for that tier and the
  * raw period vocabulary that resolves to it. Kind marks where the number
@@ -258,6 +293,10 @@ export interface RoomConfig {
   climate_mode: ClimateMode;
   schedules: ScheduleEntry[];
   schedule_selector_entity: string;
+  /** Room-owned time-of-day blocks; override bound base schedules on overlap. */
+  schedule_blocks?: ScheduleBlock[];
+  /** Explicit opt-in bindings into the shared base-schedule library. */
+  base_schedules?: BaseScheduleRef[];
   comfort_temp?: number;
   eco_temp?: number;
   comfort_heat: number;

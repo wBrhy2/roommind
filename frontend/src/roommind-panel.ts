@@ -8,6 +8,7 @@ import type {
   TouLimits,
   TouRule,
   TouTierInfo,
+  BaseSchedule,
 } from "./types";
 
 import { getEntitiesForArea } from "./utils/room-state";
@@ -68,6 +69,8 @@ export class RoomMindPanel extends LitElement {
   @state() private _presenceAwayAction: "eco" | "off" = "eco";
   /** Shared tariff rule library (settings.tou_rules) for the device cards. */
   @state() private _touRules: TouRule[] = [];
+  /** Shared base-schedule library (settings.schedules_lib) for room schedule sections. */
+  @state() private _schedulesLib: BaseSchedule[] = [];
   /** Global store limits for the room cards' store notes. */
   /** Tier dictionary (prices + vocabulary the sources feed) for the settings block. */
   @state() private _touTierInfo: TouTierInfo | null = null;
@@ -522,10 +525,12 @@ export class RoomMindPanel extends LitElement {
             .coilDryFanMode=${this._coilDryFanMode}
             .rooms=${this._rooms}
             .touRules=${this._touRules}
+            .schedulesLib=${this._schedulesLib}
             .touLimits=${this._touLimits}
             .touTierInfo=${this._touTierInfo}
             @back-clicked=${this._onBackFromDetail}
             @room-updated=${this._onRoomUpdated}
+            @schedules-lib-changed=${this._onRoomUpdated}
           ></rs-room-detail>
         `;
       }
@@ -833,6 +838,7 @@ export class RoomMindPanel extends LitElement {
         coil_dry_minutes: number;
         coil_dry_mode: string;
         coil_dry_fan_mode: string;
+        schedules_lib: BaseSchedule[];
         tou_rules: TouRule[];
         tou_limits?: TouLimits;
         tou_tier_info?: TouTierInfo | null;
@@ -859,6 +865,7 @@ export class RoomMindPanel extends LitElement {
       this._presencePersons = result.presence_persons ?? [];
       this._presenceAwayAction = result.presence_away_action ?? "eco";
       this._touRules = result.tou_rules ?? [];
+      this._schedulesLib = result.schedules_lib ?? [];
       this._touLimits = result.tou_limits ?? this._touLimits;
       this._touTierInfo = result.tou_tier_info ?? null;
     } catch (err) {

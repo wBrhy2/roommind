@@ -1143,6 +1143,52 @@ def test_row_records_ignores_broken_references() -> None:
     assert TouManager.row_records(live, rules) == []
 
 
+def test_base_schedules_cascade_under_the_room() -> None:
+    """A bound house/floor schedule steers the room; local blocks keep the last word."""
+    mgr = TouManager(_make_hass({}))
+    now = time.time()
+    mgr._timeline = TouTimeline(
+        [TouSegment(start=now, end=now + 16 * 3600, tier=TOU_TIER_OFF)],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    local = dt_util.as_local(dt_util.utc_from_timestamp(now + 60.0))
+    at = local.hour * 60 + local.minute
+    window = {
+        "start": f"{(at - 60) % 1440 // 60:02d}:{(at - 60) % 60:02d}",
+        "end": f"{(at + 60) % 1440 // 60:02d}:{(at + 60) % 60:02d}",
+        "days": [],
+    }
+    house_block = {
+        "id": "hb",
+        "name": "house eco",
+        "enabled": True,
+        "when": window,
+        "side": "heat",
+        "value": {"mode": "eco"},
+    }
+    settings = {"schedules_lib": [{"id": "sched-house", "name": "House", "scope": "house", "blocks": [house_block]}]}
+
+    # Bound: the house schedule steers the room.
+    room = _room(base_schedules=[{"id": "sched-house", "enabled": True}])
+    adjust = mgr.make_adjuster(room, settings)
+    assert adjust is not None
+    assert adjust(now + 60.0, TargetTemps(heat=21.0, cool=24.0)).heat == 17.0
+
+    # A local block on the same window outranks the shared schedule (later wins).
+    local_block = {**house_block, "id": "lb", "value": {"mode": "set", "temp": 20.0}}
+    room = _room(base_schedules=[{"id": "sched-house", "enabled": True}], schedule_blocks=[local_block])
+    adjust = mgr.make_adjuster(room, settings)
+    assert adjust is not None
+    assert adjust(now + 60.0, TargetTemps(heat=21.0, cool=24.0)).heat == 20.0
+
+    # Unbound, disabled or dangling references steer nothing — and a room with
+    # only library bindings off does not even get an adjuster.
+    assert mgr.make_adjuster(_room(base_schedules=[{"id": "sched-house", "enabled": False}]), settings) is None
+    assert mgr.make_adjuster(_room(base_schedules=[{"id": "gone"}]), settings) is None
+    assert TouManager.merged_user_blocks(_room(), settings) == []
+
+
 def test_named_values_track_the_room_targets() -> None:
     """Rule values "comfort"/"eco" aim at the room's own schedule targets.
 

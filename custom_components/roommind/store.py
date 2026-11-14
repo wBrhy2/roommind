@@ -301,6 +301,7 @@ class RoomMindStore:
             "tou_swing": config.get("tou_swing", None),
             "tou_store_gap": config.get("tou_store_gap", None),
             "schedule_blocks": config.get("schedule_blocks", []),
+            "base_schedules": config.get("base_schedules", []),
             "tou_overrides": config.get("tou_overrides", []),
             "tou_schedule_enabled": config.get("tou_schedule_enabled", False),
         }

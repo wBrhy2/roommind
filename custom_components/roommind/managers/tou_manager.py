@@ -1042,7 +1042,7 @@ class TouManager:
         store_enabled = bool(room.get("tou_store_enabled", False))
         area_id = str(room.get("area_id", ""))
         records = self.schedules(settings) + self.row_records(room, self.rule_library(settings))
-        user_blocks = room.get("schedule_blocks") or []
+        user_blocks = self.merged_user_blocks(room, settings)
         if not store_enabled and not records and not user_blocks:
             return None
         if timeline.current_tier == TOU_TIER_UNKNOWN and not self._has_tiered_events(timeline):
@@ -1237,6 +1237,31 @@ class TouManager:
         for rule in settings.get("tou_rules") or []:
             if isinstance(rule, dict) and rule.get("id"):
                 out[str(rule["id"])] = rule
+        return out
+
+    @staticmethod
+    def merged_user_blocks(room: dict[str, Any], settings: dict[str, Any]) -> list[dict[str, Any]]:
+        """The room's schedule blocks with bound base schedules expanded underneath.
+
+        Blocks from each base schedule the room opted into (``base_schedules``
+        references into ``settings["schedules_lib"]``, in listed order), then
+        the room's own ``schedule_blocks`` — the resolver lets the later row
+        win on overlap, so a house/floor schedule steers every binder while
+        the room keeps the last word. Disabled references and dangling ids
+        compile to nothing.
+        """
+        out: list[dict[str, Any]] = []
+        library = {
+            str(s.get("id")): s for s in (settings.get("schedules_lib") or []) if isinstance(s, dict) and s.get("id")
+        }
+        for ref in room.get("base_schedules") or []:
+            if not isinstance(ref, dict) or not ref.get("enabled", True):
+                continue
+            entry = library.get(str(ref.get("id") or ""))
+            if entry is None:
+                continue
+            out.extend(b for b in (entry.get("blocks") or []) if isinstance(b, dict))
+        out.extend(b for b in (room.get("schedule_blocks") or []) if isinstance(b, dict))
         return out
 
     @staticmethod
