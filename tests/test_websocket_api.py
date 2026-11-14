@@ -3531,6 +3531,114 @@ async def test_save_settings_tou_next_period_entity(ws_hass, store, connection):
 
 
 @pytest.mark.asyncio
+async def test_save_room_rule_named_target_values(ws_hass, store, connection):
+    """Comfort/Eco rule targets survive schema, upsert and blocks validation;
+    a delta action wearing a named value is rejected."""
+    import voluptuous as vol
+
+    from custom_components.roommind.websocket_api import _TOU_RULE_DEF_FIELDS
+
+    defn = {
+        "name": "hold comfort",
+        "tier": "peak",
+        "edge": "start",
+        "action": "set",
+        "heat": "comfort",
+        "cool": "eco",
+        "until": "tier_window",
+    }
+    checked = vol.Schema(_TOU_RULE_DEF_FIELDS)(defn)
+    assert checked["heat"] == "comfort" and checked["cool"] == "eco"
+
+    await store.async_load()
+    await _save_room(
+        ws_hass,
+        connection,
+        {
+            "id": 88,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room",
+            "thermostats": ["climate.living_room"],
+            "tou_schedule_enabled": True,
+            "tou_overrides": [
+                {"id": "rowN", "rule_id": "rule-comfort", "enabled": True, "definition": defn},
+            ],
+            "schedule_blocks": [
+                {
+                    "id": "blkN",
+                    "name": "eco night",
+                    "enabled": True,
+                    "when": {"start": "22:00", "end": "06:00", "days": []},
+                    "gate": "always",
+                    "side": "heat",
+                    "value": {"mode": "comfort"},
+                }
+            ],
+        },
+    )
+    connection.send_result.assert_called_once()
+    rule = store.get_settings()["tou_rules"][0]
+    assert rule["heat"] == "comfort" and rule["cool"] == "eco"
+    assert store.get_room("living_room")["schedule_blocks"][0]["value"] == {"mode": "comfort"}
+
+    # raise/lower are deltas: a named value cannot express one.
+    connection.send_result.reset_mock()
+    connection.send_error.reset_mock()
+    await _save_room(
+        ws_hass,
+        connection,
+        {
+            "id": 89,
+            "type": "roommind/rooms/save",
+            "area_id": "living_room",
+            "tou_overrides": [
+                {
+                    "id": "rowD",
+                    "rule_id": "rule-delta",
+                    "enabled": True,
+                    "definition": {**defn, "name": "bad delta", "action": "raise", "heat": "comfort"},
+                }
+            ],
+        },
+    )
+    connection.send_error.assert_called_once()
+    assert connection.send_error.call_args[0][1] == "invalid_tou_override"
+
+
+@pytest.mark.asyncio
+async def test_save_settings_tou_rules_named_values(ws_hass, store, connection):
+    """Library editing (settings/save) validates named targets like numbers."""
+    await store.async_load()
+    msg = {
+        "id": 90,
+        "type": "roommind/settings/save",
+        "tou_rules": [
+            {
+                "id": "r-ok",
+                "name": "hold eco",
+                "tier": "peak",
+                "edge": "start",
+                "action": "arrive",
+                "heat": "eco",
+                "until": "tier_window",
+            }
+        ],
+    }
+    await _save_settings(ws_hass, connection, msg)
+    connection.send_result.assert_called_once()
+    assert store.get_settings()["tou_rules"][0]["heat"] == "eco"
+
+    connection.send_result.reset_mock()
+    bad = {
+        "id": 91,
+        "type": "roommind/settings/save",
+        "tou_rules": [{**msg["tou_rules"][0], "id": "r-bad", "name": "nope", "action": "lower", "heat": "eco"}],
+    }
+    await _save_settings(ws_hass, connection, bad)
+    assert connection.send_error.call_args[0][1] == "invalid_tou_rule"
+
+
+@pytest.mark.asyncio
 async def test_save_settings_tou_rate_windows(ws_hass, store, connection):
     """Manual tariff windows persist with their weekday lists and wrapping times."""
     await store.async_load()

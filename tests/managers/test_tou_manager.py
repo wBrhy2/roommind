@@ -1143,6 +1143,111 @@ def test_row_records_ignores_broken_references() -> None:
     assert TouManager.row_records(live, rules) == []
 
 
+def test_named_values_track_the_room_targets() -> None:
+    """Rule values "comfort"/"eco" aim at the room's own schedule targets.
+
+    Resolution happens at apply time, so retuning Comfort in the room card
+    moves every named rule with it — the settings-change-heals promise for
+    rule values, and the tie-in the schedule section expects.
+    """
+    mgr = TouManager(_make_hass({}))
+    boundary = time.time() + 30.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=time.time(), end=boundary, tier=TOU_TIER_OFF),
+            TouSegment(start=boundary, end=time.time() + 16 * 3600.0, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    room, settings = _room_schedule(
+        {
+            "tier": "peak",
+            "edge": "start",
+            "action": "set",
+            "heat": "comfort",
+            "cool": "eco",
+            "until": "tier_window",
+        }
+    )
+    adjust = mgr.make_adjuster(room, settings)
+    assert adjust is not None
+    inside = adjust(boundary + 120, TargetTemps(heat=19.0, cool=26.0))
+    assert inside.heat == 21.0  # the room's comfort_heat
+    assert inside.cool == 27.0  # the room's eco_cool
+    # Retune the room: the named rule follows on the next compile.
+    room["comfort_heat"] = 22.5
+    adjust2 = mgr.make_adjuster(room, settings)
+    assert adjust2 is not None
+    assert adjust2(boundary + 120, TargetTemps(heat=19.0, cool=26.0)).heat == 22.5
+    # Outside the anchored window the plain schedule stands untouched.
+    assert adjust(time.time() + 10.0, TargetTemps(heat=19.0, cool=26.0)).heat == 19.0
+
+
+def test_named_arrive_aims_at_the_room_target() -> None:
+    """Arrive to Comfort: flat comfort value without a learned model, decay
+    curve derived from it once the model is confident."""
+    mgr = TouManager(_make_hass({}))
+    b = time.time() + 30.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=time.time(), end=b, tier=TOU_TIER_ULTRA_LOW),
+            TouSegment(start=b, end=time.time() + 16 * 3600.0, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_ULTRA_LOW,
+        current_rate=None,
+    )
+    room, settings = _room_schedule(
+        {"tier": "peak", "edge": "start", "action": "arrive", "heat": "comfort", "until": "tier_window"}
+    )
+    adjust = mgr.make_adjuster(room, settings)
+    assert adjust is not None
+    assert adjust(b + 60, TargetTemps(heat=18.0, cool=None)).heat == 21.0  # flat comfort
+    with_model = mgr.make_adjuster(room, settings, decay=(0.3, 10.0))
+    assert with_model is not None
+    assert with_model(b + 60, TargetTemps(heat=18.0, cool=None)).heat > 21.0  # pre-shoot to coast down
+    # A delta action cannot carry a named value: the side expands to nothing.
+    delta_room, delta_settings = _room_schedule(
+        {"tier": "peak", "edge": "start", "action": "raise", "heat": "comfort", "until": "tier_window"}
+    )
+    assert TouManager.row_records(delta_room, TouManager.rule_library(delta_settings)) == []
+
+
+def test_user_blocks_named_values() -> None:
+    """Schedule blocks speak the same vocabulary: "comfort"/"eco" resolve
+    against the room, exactly like a fixed temperature would."""
+    mgr = TouManager(_make_hass({}))
+    b = time.time() + 1800.0
+    mgr._timeline = TouTimeline(
+        [
+            TouSegment(start=time.time(), end=b, tier=TOU_TIER_OFF),
+            TouSegment(start=b, end=time.time() + 16 * 3600, tier=TOU_TIER_PEAK),
+        ],
+        current_tier=TOU_TIER_OFF,
+        current_rate=None,
+    )
+    local = dt_util.as_local(dt_util.utc_from_timestamp(b + 60.0))
+    at = local.hour * 60 + local.minute
+    block = {
+        "id": "eco-in-peak",
+        "name": "eco during peak hours",
+        "enabled": True,
+        "side": "heat",
+        "gate": "always",
+        "when": {
+            "start": f"{(at - 60) % 1440 // 60:02d}:{(at - 60) % 60:02d}",
+            "end": f"{(at + 60) % 1440 // 60:02d}:{(at + 60) % 60:02d}",
+            "days": [],
+        },
+        "value": {"mode": "eco"},
+    }
+    adjust = mgr.make_adjuster(_room(schedule_blocks=[block]), {})
+    assert adjust is not None
+    assert adjust(b + 60, TargetTemps(heat=19.0, cool=26.0)).heat == 17.0  # the room's eco_heat
+    # Out of the block's clock window (four hours past it) the named value steers nothing.
+    assert adjust(b + 60 + 4 * 3600.0, TargetTemps(heat=19.0, cool=26.0)).heat == 19.0
+
+
 def test_schedule_disabled_section_cannot_steer() -> None:
     """The section toggle gates the whole schedule: rows stay, they just don't act.
 
@@ -1700,6 +1805,13 @@ def test_record_clock_end_rolls_to_next_day() -> None:
         current_tier=TOU_TIER_OFF,
         current_rate=None,
     )
+    # A clock twelve wall-clock hours behind "now": its next occurrence is
+    # always ~12 h ahead (inside the horizon), and past midday it can only be
+    # reached after midnight — the roll this guards. A fixed "00:30" was the
+    # same species of time-of-day flake as beta17's window test: run just
+    # before 00:30 local, the same-day occurrence lands before the probe.
+    local = dt_util.as_local(dt_util.utc_from_timestamp(now))
+    rolled = (local.hour * 60 + local.minute + 720) % 1440
     settings = {
         "tou_schedules": [
             {
@@ -1712,8 +1824,7 @@ def test_record_clock_end_rolls_to_next_day() -> None:
                 "edge": "start",
                 "phase": "after",
                 "until": "clock",
-                # 00:30 — boundary is "now"; this can only be reached after midnight.
-                "clock": "00:30",
+                "clock": f"{rolled // 60:02d}:{rolled % 60:02d}",
                 "value": {"mode": "set", "temp": 19.0},
             }
         ]

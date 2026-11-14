@@ -49,6 +49,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from ..const import (
+    DEFAULT_COMFORT_COOL,
+    DEFAULT_COMFORT_HEAT,
     DEFAULT_ECO_COOL,
     DEFAULT_ECO_HEAT,
     DEFAULT_TOU_COAST_MAX_MINUTES,
@@ -123,23 +125,38 @@ def _hhmm_to_minutes(raw: Any) -> int | None:
     return hour * 60 + minute
 
 
-def _value_candidate(value: Any, plain: float) -> float | None:
-    """Resolve a record/block value against the plain schedule target."""
+def _value_candidate(value: Any, plain: float, comfort: float | None = None, eco: float | None = None) -> float | None:
+    """Resolve a record/block value against the plain schedule target.
+
+    "comfort" and "eco" name the room's own configured targets (the same
+    values the schedule section edits), so a rule tracks the room instead of
+    freezing a number; the caller passes the side-appropriate pair.
+    """
     if not isinstance(value, dict):
         return None
+    mode = str(value.get("mode") or "set")
     try:
-        if str(value.get("mode") or "set") == "shift":
+        if mode == "shift":
             delta = abs(float(value.get("delta")))  # type: ignore[arg-type]
             if str(value.get("direction") or "raise") == "lower":
                 delta = -delta
             return plain + delta
+        if mode in ("comfort", "eco"):
+            base = comfort if mode == "comfort" else eco
+            return None if base is None else float(base)
         return float(value.get("temp"))  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
 
 
 def _arrive_candidate(
-    value: Any, window: dict[str, Any], ts: float, decay: DecayFn | None, is_heat: bool
+    value: Any,
+    window: dict[str, Any],
+    ts: float,
+    decay: DecayFn | None,
+    is_heat: bool,
+    comfort: float | None = None,
+    eco: float | None = None,
 ) -> float | None:
     """Decay-derived floor for an ``arrive`` record at *ts*.
 
@@ -150,7 +167,8 @@ def _arrive_candidate(
     temperature needed right now is
     ``t_out + (temp - t_out) * e^(alpha*(t_end - ts))`` — the "indirect
     target" the user schedules, replanned every cycle and continuous at the
-    arrival instant. Mirrors automatically for the cooling side. Without a
+    arrival instant. Mirrors automatically for the cooling side. A ``to``
+    of "comfort"/"eco" aims at the room's own configured target. Without a
     confident learned model (``decay`` None) — or when the outdoors would
     drift the room the wrong way (above the heating target / below the
     cooling target) — this degrades to the flat temperature, i.e. classic
@@ -158,9 +176,15 @@ def _arrive_candidate(
     """
     if not isinstance(value, dict) or str(value.get("mode")) != "arrive":
         return None
-    try:
-        temp = float(value.get("temp"))  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    named = str(value.get("to") or "")
+    if named in ("comfort", "eco"):
+        temp = comfort if named == "comfort" else eco
+    else:
+        try:
+            temp = float(value.get("temp"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+    if temp is None:
         return None
     if decay is None:
         return temp
@@ -198,6 +222,8 @@ def _apply_tariff_windows(
     vacation_now: bool,
     is_heat: bool,
     decay: DecayFn | None = None,
+    comfort: float | None = None,
+    eco: float | None = None,
 ) -> float | None:
     """Tariff schedule records replace tier shaping on their side (chain step 4)."""
     if plain is None:
@@ -207,9 +233,9 @@ def _apply_tariff_windows(
         return shaped
     rec = active["rec"]
     value = rec.get("value")
-    cand = _arrive_candidate(value, active, ts, decay, is_heat)
+    cand = _arrive_candidate(value, active, ts, decay, is_heat, comfort, eco)
     if cand is None:
-        cand = _value_candidate(value, plain)
+        cand = _value_candidate(value, plain, comfort, eco)
     if cand is None:
         return shaped
 
@@ -262,6 +288,8 @@ def _apply_user_blocks(
     shaped: float,
     mold_active: bool,
     vacation_now: bool,
+    comfort: float | None = None,
+    eco: float | None = None,
 ) -> float | None:
     """Room-level schedule blocks outrank the tariff machinery (chain step 3)."""
     if plain is None:
@@ -274,7 +302,7 @@ def _apply_user_blocks(
             active = block  # later in the list wins
     if active is None:
         return shaped
-    cand = _value_candidate(active.get("value"), plain)
+    cand = _value_candidate(active.get("value"), plain, comfort, eco)
     if cand is None:
         return shaped
     if side == "heat" and _heat_guarded(cand, shaped, plain, mold_active, vacation_now):
@@ -1039,6 +1067,10 @@ class TouManager:
         gap = max(1.0, _num(room.get("tou_store_gap"), _num(settings.get("tou_store_gap"), DEFAULT_TOU_STORE_GAP)))
         eco_heat = _num(room.get("eco_heat", room.get("eco_temp")), DEFAULT_ECO_HEAT)
         eco_cool = _num(room.get("eco_cool"), DEFAULT_ECO_COOL)
+        # Named-value resolution ("set to Comfort/Eco"): the room's own
+        # configured targets, same sources the schedule resolver reads.
+        comfort_heat = _num(room.get("comfort_heat", room.get("comfort_temp")), DEFAULT_COMFORT_HEAT)
+        comfort_cool = _num(room.get("comfort_cool"), DEFAULT_COMFORT_COOL)
         store_runs = self._store_runs(timeline, gap) if store_enabled else []
 
         override_heat = room.get("override_heat")
@@ -1111,6 +1143,8 @@ class TouManager:
                 vacation_now,
                 True,
                 decay,
+                comfort_heat,
+                eco_heat,
             )
             cool = _apply_tariff_windows(
                 tariff_windows["cool"],
@@ -1123,6 +1157,8 @@ class TouManager:
                 vacation_now,
                 False,
                 decay,
+                comfort_cool,
+                eco_cool,
             )
             heat = _apply_user_blocks(
                 user_blocks,
@@ -1133,6 +1169,8 @@ class TouManager:
                 heat,  # type: ignore[arg-type]
                 mold_active,
                 vacation_now,  # type: ignore[arg-type]
+                comfort_heat,
+                eco_heat,
             )
             cool = _apply_user_blocks(
                 user_blocks,
@@ -1143,6 +1181,8 @@ class TouManager:
                 cool,  # type: ignore[arg-type]
                 mold_active,
                 vacation_now,  # type: ignore[arg-type]
+                comfort_cool,
+                eco_cool,
             )
             return TargetTemps(heat=heat, cool=cool)
 
@@ -1270,10 +1310,20 @@ class TouManager:
         out: list[dict[str, Any]] = []
         for side in ("heat", "cool"):
             temp = rule.get(side)
-            if not isinstance(temp, (int, float)) or isinstance(temp, bool):
+            named = temp if isinstance(temp, str) and temp in ("comfort", "eco") else None
+            if named is not None:
+                # A named target tracks the room's own configured temperature
+                # (resolved at apply time, so settings changes heal next cycle).
+                if action == "set":
+                    value: dict[str, Any] = {"mode": named}
+                elif action == "arrive":
+                    value = {"mode": "arrive", "to": named}
+                else:
+                    continue  # raise/lower are deltas; a named value cannot express one
+            elif not isinstance(temp, (int, float)) or isinstance(temp, bool):
                 continue  # blank side: the rule skips this mode
-            if action == "set":
-                value: dict[str, Any] = {"mode": "set", "temp": float(temp)}
+            elif action == "set":
+                value = {"mode": "set", "temp": float(temp)}
             elif action == "arrive":
                 value = {"mode": "arrive", "temp": float(temp)}
             else:

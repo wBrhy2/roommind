@@ -178,9 +178,10 @@ export interface TouRule {
   /** Whether the rule fires when the tier starts or when it ends. */
   edge: "start" | "end";
   action: TouOverrideAction;
-  /** °C target for set/arrive, Δ°C for raise/lower; null/undefined = skip. */
-  heat?: number | null;
-  cool?: number | null;
+  /** °C target for set/arrive (or "comfort"/"eco" = the room's own target),
+   * Δ°C for raise/lower; null/undefined = skip this side. */
+  heat?: number | "comfort" | "eco" | null;
+  cool?: number | "comfort" | "eco" | null;
   until: TouOverrideUntil;
   /** Duration when until = "minutes". */
   minutes?: number;

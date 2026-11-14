@@ -279,10 +279,12 @@ TOU_SIDES = ["heat", "cool"]
 TOU_EDGES = ["start", "end"]
 TOU_PHASES = ["before", "after"]
 TOU_UNTILS = ["minutes", "window", "next_change", "clock", "next_tier_change"]
-TOU_VALUE_MODES = ["set", "shift", "arrive"]
+# "comfort"/"eco" name the room's own configured targets — plain values any
+# record or user block may aim at (resolved at apply time per side).
+TOU_VALUE_MODES = ["set", "shift", "arrive", "comfort", "eco"]
 # User schedule blocks (chain step 3) stay on the plain modes; "arrive" is a
 # tariff concept, its curve needs a tier boundary to anchor on.
-TOU_BLOCK_VALUE_MODES = ["set", "shift"]
+TOU_BLOCK_VALUE_MODES = ["set", "shift", "comfort", "eco"]
 TOU_SHIFT_DIRECTIONS = ["raise", "lower"]
 TOU_SCHEDULE_MINUTES_MIN = 5
 TOU_SCHEDULE_MINUTES_MAX = 720

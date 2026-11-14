@@ -148,8 +148,8 @@ _TOU_RULE_DEF_FIELDS = {
     vol.Optional("tier", default="any"): vol.In([*TOU_TIERS, "any"]),
     vol.Optional("edge", default="start"): vol.In(TOU_EDGES),
     vol.Required("action"): vol.In(TOU_ROW_ACTIONS),
-    vol.Optional("heat"): vol.Any(None, vol.Coerce(float)),
-    vol.Optional("cool"): vol.Any(None, vol.Coerce(float)),
+    vol.Optional("heat"): vol.Any(None, "comfort", "eco", vol.Coerce(float)),
+    vol.Optional("cool"): vol.Any(None, "comfort", "eco", vol.Coerce(float)),
     vol.Optional("until", default="tier_window"): vol.In(TOU_ROW_UNTILS),
     vol.Optional("minutes", default=0): vol.Coerce(int),
     vol.Optional("clock", default=""): str,
@@ -172,10 +172,16 @@ def _tou_rule_def_error(defn: dict) -> str | None:
     sides = [v for v in (defn.get("heat"), defn.get("cool")) if v is not None]
     if not sides:
         return "Tariff rules need a heating or a cooling value"
-    if action in ("set", "arrive") and not all(
-        TOU_SCHEDULE_TEMP_MIN <= float(v) <= TOU_SCHEDULE_TEMP_MAX for v in sides
-    ):
-        return f"'{action}' needs temperatures {TOU_SCHEDULE_TEMP_MIN:g}-{TOU_SCHEDULE_TEMP_MAX:g} °C"
+    named = [v for v in sides if isinstance(v, str)]
+    numbers = [v for v in sides if not isinstance(v, str)]
+    if action in ("set", "arrive"):
+        # Named values (Comfort/Eco) aim at the room's own targets: no
+        # numeric range to check, only the plain temperatures.
+        if not all(TOU_SCHEDULE_TEMP_MIN <= float(v) <= TOU_SCHEDULE_TEMP_MAX for v in numbers):
+            return f"'{action}' needs temperatures {TOU_SCHEDULE_TEMP_MIN:g}-{TOU_SCHEDULE_TEMP_MAX:g} °C"
+    elif named:
+        # raise/lower are deltas; a named value cannot express one.
+        return f"'{action}' needs numeric deltas, not a named temperature"
     if action in ("raise", "lower") and not all(
         TOU_SCHEDULE_SHIFT_MIN <= abs(float(v)) <= TOU_SCHEDULE_SHIFT_MAX for v in sides
     ):

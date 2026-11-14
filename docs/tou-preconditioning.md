@@ -241,7 +241,10 @@ For every matching change in the timeline the row computes a window:
   **Arrive** choice — charge during a named period and reach the target by a
   clock time, or coast through a named period and reach it at the period's end
   (see below).
-- **Heating / Cooling**: one value per mode, each optional. A blank side
+- **Heating / Cooling**: one value per mode, each optional. Each side either
+  steers a fixed temperature or names the room's own **Comfort** or **Eco**
+  target — a named side follows the schedule section when you retune it, so
+  rules say "back to comfort" instead of freezing a number. A blank side
   means the row is skipped in that mode — a heating-only row leaves cooling
   entirely alone (plain tier shaping still applies there).
 - **Holds**: until the next period change, for a fixed number of minutes, or

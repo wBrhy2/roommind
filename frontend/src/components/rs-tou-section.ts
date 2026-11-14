@@ -333,9 +333,16 @@ export class RsTouSection extends LitElement {
       }
       .anchor-grid ha-select,
       .temp-grid ha-textfield,
+      .temp-grid ha-select,
       .end-grid ha-select,
       .end-grid ha-textfield {
         width: 100%;
+      }
+      .temp-grid .temp-side {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
       }
       .day-row {
         display: flex;
@@ -687,44 +694,72 @@ export class RsTouSection extends LitElement {
         }
 
         <div class="temp-grid">
-          <ha-textfield
-            type="number"
-            .value=${rule.heat == null ? "" : String(isDelta ? toDisplayDelta(rule.heat, this.hass) : toDisplay(rule.heat, this.hass))}
-            .label=${sideLabel("heat")}
-            min=${range.min}
-            max=${range.max}
-            step=${tempStep(this.hass)}
-            @change=${(e: Event) => {
-              const raw = (e.target as HTMLInputElement).value.trim();
-              if (raw === "") update({ heat: null });
-              else {
-                const v = parseFloat(raw);
-                if (!isNaN(v))
-                  update({
-                    heat: isDelta ? toCelsiusDelta(v, this.hass) : toCelsius(v, this.hass),
-                  });
+          ${(["heat", "cool"] as const).map((side) => {
+            const current = side === "heat" ? rule.heat : rule.cool;
+            const named = typeof current === "string" ? current : "";
+            const setSide = (v: number | "comfort" | "eco" | null) =>
+              update({ [side]: v } as Partial<TouRuleDef>);
+            if (isDelta) {
+              return html`<ha-textfield
+                type="number"
+                .value=${current == null ? "" : String(toDisplayDelta(current as number, this.hass))}
+                .label=${sideLabel(side)}
+                min=${range.min}
+                max=${range.max}
+                step=${tempStep(this.hass)}
+                @change=${(e: Event) => {
+                  const raw = (e.target as HTMLInputElement).value.trim();
+                  if (raw === "") setSide(null);
+                  else {
+                    const v = parseFloat(raw);
+                    if (!isNaN(v)) setSide(toCelsiusDelta(v, this.hass));
+                  }
+                }}
+              ></ha-textfield>`;
+            }
+            // The mode select doubles as the side's editor: "Fixed" steers a
+            // number, Comfort/Eco aim at the room's own schedule targets and
+            // follow them when retuned.
+            return html`<div class="temp-side">
+              <ha-select
+                .label=${sideLabel(side)}
+                .value=${named || "fixed"}
+                .options=${[
+                  { value: "fixed", label: localize("tou.value_fixed", l) },
+                  { value: "comfort", label: localize("tou.value_comfort", l) },
+                  { value: "eco", label: localize("tou.value_eco", l) },
+                ]}
+                @selected=${(e: Event) => {
+                  const v = getSelectValue(e);
+                  if (v === "comfort" || v === "eco") setSide(v);
+                  else if (v === "fixed" && named)
+                    // Back from a named target: freeze what it was steering.
+                    setSide(this._roomTarget(side, named));
+                }}
+                @closed=${(e: Event) => e.stopPropagation()}
+                fixedMenuPosition
+              ></ha-select>
+              ${
+                named
+                  ? nothing
+                  : html`<ha-textfield
+                      type="number"
+                      .value=${current == null ? "" : String(toDisplay(current as number, this.hass))}
+                      min=${range.min}
+                      max=${range.max}
+                      step=${tempStep(this.hass)}
+                      @change=${(e: Event) => {
+                        const raw = (e.target as HTMLInputElement).value.trim();
+                        if (raw === "") setSide(null);
+                        else {
+                          const v = parseFloat(raw);
+                          if (!isNaN(v)) setSide(toCelsius(v, this.hass));
+                        }
+                      }}
+                    ></ha-textfield>`
               }
-            }}
-          ></ha-textfield>
-          <ha-textfield
-            type="number"
-            .value=${rule.cool == null ? "" : String(isDelta ? toDisplayDelta(rule.cool, this.hass) : toDisplay(rule.cool, this.hass))}
-            .label=${sideLabel("cool")}
-            min=${range.min}
-            max=${range.max}
-            step=${tempStep(this.hass)}
-            @change=${(e: Event) => {
-              const raw = (e.target as HTMLInputElement).value.trim();
-              if (raw === "") update({ cool: null });
-              else {
-                const v = parseFloat(raw);
-                if (!isNaN(v))
-                  update({
-                    cool: isDelta ? toCelsiusDelta(v, this.hass) : toCelsius(v, this.hass),
-                  });
-              }
-            }}
-          ></ha-textfield>
+            </div>`;
+          })}
         </div>
         <div class="hint">${localize("tou.override_sides_hint", l)}</div>
 
@@ -1323,6 +1358,23 @@ export class RsTouSection extends LitElement {
 
   // ---- Summary ----
 
+  /** The room's own configured temperature a named side targets (°C) — the
+   * same values the schedule section edits. Used when switching a side from
+   * Comfort/Eco back to Fixed, so the number starts where the room steered. */
+  private _roomTarget(side: "heat" | "cool", name: "comfort" | "eco"): number | null {
+    const room = this.allRooms?.[this.areaId];
+    if (!room) return null;
+    const v =
+      name === "comfort"
+        ? side === "heat"
+          ? (room.comfort_heat ?? room.comfort_temp)
+          : room.comfort_cool
+        : side === "heat"
+          ? (room.eco_heat ?? room.eco_temp)
+          : room.eco_cool;
+    return typeof v === "number" ? v : null;
+  }
+
   /** Compact one-line description of a rule, display units. */
   private _summarize(rule: TouRuleDef, l: string): string {
     const tier =
@@ -1334,8 +1386,10 @@ export class RsTouSection extends LitElement {
       const v = rule[side];
       if (v == null) continue;
       const value = isDelta
-        ? `${toDisplayDelta(v, this.hass)}${tempUnit(this.hass)}`
-        : `${toDisplay(v, this.hass)}${tempUnit(this.hass)}`;
+        ? `${toDisplayDelta(v as number, this.hass)}${tempUnit(this.hass)}`
+        : typeof v === "string"
+          ? localize(`tou.value_${v}`, l)
+          : `${toDisplay(v, this.hass)}${tempUnit(this.hass)}`;
       sides.push(`${localize(`tou.override_side.${side}`, l)} ${value}`);
     }
     const action = localize(`tou.override_action.${rule.action}`, l);
