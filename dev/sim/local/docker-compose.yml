@@ -1,0 +1,19 @@
+# Official Home Assistant container — the more "real box" route, needs docker
+# access (once: sudo usermod -aG docker $USER, then re-login).
+# Reuses the same test-bed config as ha-test.sh (~/.roommind-ha-test/config);
+# pick one of the two, not both at once. Files written by the container end up
+# root-owned in that folder — `docker compose down` + delete the folder resets.
+#   docker compose -f dev/sim/local/docker-compose.yml up -d
+#   docker compose -f dev/sim/local/docker-compose.yml down
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: roommind-ha
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - ${HOME}/.roommind-ha-test/config:/config
+      - ../../../custom_components/roommind:/config/custom_components/roommind:ro
+    environment:
+      - TZ=UTC

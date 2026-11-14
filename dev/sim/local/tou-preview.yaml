@@ -1,0 +1,74 @@
+# Time-of-Use preview — extends baseline-radiator-house.
+# Brings a throwaway HA instance up to real time with TOU enabled, then keeps
+# running so you can browse Settings -> Time-of-Use control and the per-room
+# TOU section. The tariff cycles on a ~24 h rhythm during catch-up and the
+# last change lands on a fresh On-Peak about 2 h before "now", so the panel
+# shows live tier shaping and an active coast window (300 min rule, ~3 h left).
+name: tou-preview
+description: >
+  Baseline house with Time-of-Use awareness: cost sensor (input_number) and
+  period sensor (input_select) drive tier shaping; two coast rules; setback
+  and setback+boost rooms. Preview only — no expectations.
+extends: baseline-radiator-house
+start: now-2d
+duration: 2d
+tags: [preview, tou]
+
+helpers:
+  input_number:
+    strompreis: {name: Strompreis, min: 0.0, max: 0.4, step: 0.001, initial: 0.22}
+  input_select:
+    tarifperiode:
+      name: Tarifperiode
+      options: ["On-Peak", "Mid-Peak", "Off-Peak", "Ultra-Low Overnight"]
+      initial: "On-Peak"
+
+roommind:
+  settings:
+    tou_enabled: true
+    tou_rate_entity: input_number.strompreis
+    tou_period_entity: input_select.tarifperiode
+    tou_price_weighting: true
+    tou_peak_threshold: 0.20
+    tou_mid_threshold: 0.12
+    tou_ultra_threshold: 0.06
+    tou_coast_rules:
+      - id: peak-coast
+        name: Coast through peaks
+        rooms: [wohnzimmer, kueche]
+        trigger: {from_tier: "", to_tier: peak}
+        coast_temp: 18.5
+        end: {mode: duration, value: 300}
+        post_hold: schedule
+      - id: morning-carry
+        name: Carry the pre-charge until 07:00
+        rooms: [schlafzimmer]
+        trigger: {from_tier: ultra_low, to_tier: mid}
+        coast_temp: 19.0
+        end: {mode: clock, value: "07:00"}
+        post_hold: stay
+  rooms:
+    wohnzimmer: {tou_mode: setback_boost, tou_max_boost: 23.0}
+    kueche: {tou_mode: setback}
+    schlafzimmer: {tou_mode: setback}
+    buero: {tou_mode: setback_boost, tou_max_boost: 22.0, tou_boost_unoccupied: true}
+
+timeline:
+  # Day 1 of the catch-up: full tariff cycle ...
+  - {at: "+5h",  do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "Mid-Peak"}}
+  - {at: "+5h",  do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.13}}
+  - {at: "+11h", do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "Off-Peak"}}
+  - {at: "+11h", do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.08}}
+  - {at: "+17h", do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "Ultra-Low Overnight"}}
+  - {at: "+17h", do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.04}}
+  # ... and day 2, ending in a fresh peak ~2 h before real "now".
+  - {at: "+24h", do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "On-Peak"}}
+  - {at: "+24h", do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.22}}
+  - {at: "+29h", do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "Mid-Peak"}}
+  - {at: "+29h", do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.13}}
+  - {at: "+35h", do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "Off-Peak"}}
+  - {at: "+35h", do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.08}}
+  - {at: "+41h", do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "Ultra-Low Overnight"}}
+  - {at: "+41h", do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.04}}
+  - {at: "+46h", do: ha.service, service: input_select.select_option, data: {entity_id: input_select.tarifperiode, option: "On-Peak"}}
+  - {at: "+46h", do: ha.service, service: input_number.set_value, data: {entity_id: input_number.strompreis, value: 0.22}}
